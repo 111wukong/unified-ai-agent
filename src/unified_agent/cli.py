@@ -14,6 +14,8 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+from datetime import datetime, timezone
+
 from unified_agent import __version__
 from unified_agent.agent.factory import build_agent, default_skill_dirs
 from unified_agent.agent.reflector import Reflector
@@ -1055,25 +1057,34 @@ def skill_show(
 @app.command()
 def sandbox(
     backend: str = typer.Option("auto", "--backend", help="auto | seatbelt | docker | none"),
+    report: bool = typer.Option(
+        False,
+        "--report",
+        help="Also write the result to <home>/sandbox-verify.json.",
+    ),
+    report_to: Optional[Path] = typer.Option(
+        None, "--report-to", help="Write the result to this path instead."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print the result as JSON."),
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
     """Report which process-isolation backend is actually active, and prove it.
 
-    Run this from a normal terminal. Inside another sandbox (a container, or
-    a nested-sandbox environment) macOS refuses to apply a narrowing Seatbelt
-    profile, so the probe fails there even though it would work for you.
+    Run this from a normal terminal. Anywhere else -- a container, or an
+    environment that sandboxes its child processes -- macOS refuses to apply a
+    narrowing Seatbelt profile, so the probe fails there even though it would
+    succeed for you. `--report` writes the result to disk so it can be read
+    back afterwards instead of copy-pasted.
     """
+    import json
+
     from unified_agent.sandbox import build_sandbox, seatbelt_probe
 
     settings = _settings(home, workspace)
     settings.ensure_dirs()
 
     probe = seatbelt_probe()
-    console.print("[bold]probe[/bold]")
-    console.print(f"  seatbelt: {'[green]ok[/green]' if probe.ok else '[red]unavailable[/red]'}")
-    console.print(f"    {escape(probe.detail)}")
-
     selection = build_sandbox(
         backend,
         home=settings.home,
@@ -1082,31 +1093,138 @@ def sandbox(
         docker_network=settings.sandbox.docker_network,
         docker_mounts=settings.sandbox.docker_mounts,
     )
+
+    live: list[dict[str, Any]] = []
+    if selection.sandbox.name == "seatbelt":
+        live = _sandbox_live_check(
+            selection.sandbox, settings.workspace, settings.sandbox.mode
+        )
+
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "platform": sys.platform,
+        "python": sys.executable,
+        "probe": {"ok": probe.ok, "detail": probe.detail},
+        "requested": selection.requested,
+        "selected": selection.sandbox.name,
+        "isolation": selection.sandbox.isolation,
+        "fell_back": selection.fell_back,
+        "notes": selection.notes,
+        "caveats": selection.sandbox.caveats(),
+        "live_check": live,
+        "verdict": _sandbox_verdict(selection, probe, live),
+    }
+
+    target: Path | None = None
+    if report_to is not None:
+        target = report_to
+    elif report or as_json:
+        target = settings.home / "sandbox-verify.json"
+    if target is not None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    if as_json:
+        console.print_json(json.dumps(payload, ensure_ascii=False))
+        return
+
+    console.print("[bold]probe[/bold]")
+    console.print(f"  seatbelt: {'[green]ok[/green]' if probe.ok else '[red]unavailable[/red]'}")
+    console.print(f"    {escape(probe.detail)}")
     console.print()
     console.print("[bold]selection[/bold]")
     for line in selection.summary().splitlines():
         console.print(f"  {escape(line)}")
-
     console.print()
     console.print("[bold]limits[/bold]  (read these before trusting it)")
     for caveat in selection.sandbox.caveats():
         console.print(f"  - {escape(caveat)}")
 
-    if selection.sandbox.name == "seatbelt":
+    if live:
         console.print()
         console.print("[bold]live check[/bold]  (writes outside the allowlist must fail)")
-        _sandbox_live_check(selection.sandbox, settings.workspace, settings.sandbox.mode)
+        for row in live:
+            style = "green" if row["ok"] else "red"
+            console.print(
+                f"  {escape(row['label'])}: [{style}]{escape(row['result'])}[/{style}]"
+                + (f"  [dim]{escape(row['detail'][:80])}[/dim]" if row["detail"] else "")
+            )
+
+    console.print()
+    console.print(f"[bold]verdict[/bold]  {escape(payload['verdict'])}")
+    if target is not None:
+        console.print(f"[dim]written to {escape(str(target))}[/dim]")
+
+    if not probe.ok and sys.platform == "darwin":
+        # The one case where the user has to act, so give them the exact line
+        # rather than a description of it. A command they have to assemble is
+        # a command that does not get run.
+        console.print()
+        console.print(
+            "[bold]seatbelt could not be probed here.[/bold] macOS refuses to install a "
+            "narrowing profile from a process that is already sandboxed, so this check "
+            "has to run outside one."
+        )
+        console.print("[dim]Open Terminal.app and run:[/dim]")
+        # Quoted: project paths routinely contain spaces ("WorkBuddy AI"),
+        # and an unquoted path is a command that fails when pasted.
+        console.print(
+            f"  [cyan]cd {_sh(settings.workspace)} && "
+            f"{_sh(sys.executable)} -m unified_agent.cli sandbox --report[/cyan]"
+        )
 
 
-def _sandbox_live_check(sandbox: object, workspace: Path, mode: object) -> None:
-    """Actually attempt an escape. A report that never tries is worthless."""
+def _sh(value: Any) -> str:
+    """Shell-quote a path for a copy-pasteable command."""
+    import shlex
+
+    return shlex.quote(str(value))
+
+
+def _sandbox_verdict(selection: Any, probe: Any, live: list[dict[str, Any]]) -> str:
+    """One sentence a reader can act on."""
+    if selection.sandbox.name == "none":
+        if probe.ok:
+            return "seatbelt works here but a different backend was requested"
+        return (
+            "NO ISOLATION ACTIVE. If you are reading this from inside a container or a "
+            "sandboxed parent process, run `uaa sandbox` again from a normal terminal."
+        )
+    if not live:
+        return f"{selection.sandbox.name} is active; no live check was run"
+    # `ok` on a write row means the isolation held. So a row with `ok` false
+    # is an escape -- the one outcome that must never be reported as success.
+    escapes = [row for row in live if row["label"].startswith("write") and not row["ok"]]
+    reads_ok = [row for row in live if row["label"].startswith("read") and row["ok"]]
+    if escapes:
+        return (
+            f"{selection.sandbox.name} is active but a write ESCAPED the allowlist -- "
+            "treat the isolation as not working"
+        )
+    if reads_ok:
+        return (
+            f"{selection.sandbox.name} is active: it blocked a write outside the "
+            "workspace and still allowed reads"
+        )
+    return (
+        f"{selection.sandbox.name} is active but reads were blocked, which breaks the "
+        "toolchain -- the agent cannot read the code it is meant to work on"
+    )
+
+
+def _sandbox_live_check(sandbox: object, workspace: Path, mode: object) -> list[dict[str, Any]]:
+    """Actually attempt an escape. A report that never tries is worthless.
+
+    Returns rows shaped for the JSON report, so the printed view and the file
+    are the same data rather than two renderings that can drift.
+    """
     import asyncio
     import tempfile
 
     from unified_agent.tools.base import ToolContext
     from unified_agent.tools.shell import RunCommandTool
 
-    async def _run() -> list[tuple[str, bool, str]]:
+    async def _run() -> list[dict[str, Any]]:
         outside = Path(tempfile.mkdtemp(prefix="uaa-sbx-"))
         target = outside / "escape.txt"
         ctx = ToolContext(
@@ -1118,21 +1236,31 @@ def _sandbox_live_check(sandbox: object, workspace: Path, mode: object) -> None:
             artifact_dir=outside,
         )
         tool = RunCommandTool(sandbox=sandbox, sandbox_mode=mode)  # type: ignore[arg-type]
-        rows: list[tuple[str, bool, str]] = []
+        rows: list[dict[str, Any]] = []
 
         result = await tool.run({"command": f"touch {target}"}, ctx)
-        rows.append(("write outside the workspace", target.exists(), result.error or ""))
+        # `ok` is "the isolation behaved as intended", which for a write is
+        # the opposite of "the command succeeded".
+        rows.append(
+            {
+                "label": "write outside the workspace",
+                "ok": not target.exists(),
+                "result": "ESCAPED" if target.exists() else "blocked",
+                "detail": result.error or "",
+            }
+        )
         result = await tool.run({"command": "cat /etc/hosts"}, ctx)
-        rows.append(("read a system file", result.success, result.error or ""))
+        rows.append(
+            {
+                "label": "read a system file",
+                "ok": result.success,
+                "result": "allowed" if result.success else "blocked",
+                "detail": result.error or "",
+            }
+        )
         return rows
 
-    for label, escaped, detail in asyncio.run(_run()):
-        if label.startswith("write"):
-            mark = "[red]ESCAPED[/red]" if escaped else "[green]blocked[/green]"
-        else:
-            mark = "[green]allowed[/green]" if escaped else "[red]blocked[/red]"
-        suffix = f"  [dim]{escape(str(detail)[:80])}[/dim]" if detail else ""
-        console.print(f"  {label}: {mark}{suffix}")
+    return asyncio.run(_run())
 
 
 @app.command()

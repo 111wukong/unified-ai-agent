@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-435%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-440%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -353,6 +353,10 @@ uaa desktop                      # 原生窗口
 uaa desktop --bundle             # ~/Applications/UnifiedAgent.app，可双击
 ```
 
+> **如果 `pip install` 报 `EEXIST: mkdir .../pip-install-*/...`**，用 `uv` 装：
+> `uv pip install --python .venv/bin/python "pywebview>=5.0"`。
+> 这是 pip 在某些受限环境下创建临时目录失败，uv 走的是另一套机制。
+
 窗口是**操作系统自己的 webview**（macOS 上 WKWebView）套在**同一个服务、同一个控制台**外面。没有第二套 UI，没有第二套构建系统，没有捆绑 Chromium。
 
 为什么不是 Electron / Tauri：
@@ -377,7 +381,13 @@ uaa desktop --bundle             # ~/Applications/UnifiedAgent.app，可双击
 uaa sandbox        # 报告实际生效的是哪个后端，并真的试一次越界写入
 ```
 
+```bash
+uaa sandbox --report    # 报告 + 把机器可读结果写到 <home>/sandbox-verify.json
+```
+
 `uaa config set sandbox.mode read-only` 会让**项目目录含 `.git` 全部只读** —— `git log/diff/show/blame` 能用，`commit/checkout/fetch` 和文件编辑全部失败。**「分析这个项目」和「修改这个项目」是两个不同的档位**，不该共用一份权限配置。
+
+> **必须在普通终端里跑。** macOS **拒绝**从「已经被沙箱化的进程」安装更窄的 profile（`sandbox_apply: Operation not permitted`）—— 容器里、以及任何会给子进程套沙箱的环境里都探测不到。`uaa sandbox` 会检测到这种情况，并打印一条**可直接粘贴**的命令。
 
 威胁模型是抄 Codex / Gemini CLI 的，而且理由充分：
 
@@ -426,7 +436,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 435 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 440 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -455,6 +465,8 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 | `@dataclass` 默认 `eq=True` 使订阅者不可哈希 | 加进 `set` 直接崩；测试全绿是因为没人订阅 |
 | WebSocket 只转发实时事件、不回放历史 | 晚连的客户端永远挂住 |
 | 沙箱不可用时 `wrap` 静默直通 | 用户配了 Seatbelt 却在裸跑，没人告诉他 |
+| **判定逻辑写反** | `escaped` 非空意味着写入**逃逸了**，却返回「已阻断」—— 报告会给出与事实相反的结论 |
+| 可粘贴命令里的路径没加引号 | 项目路径含空格（`WorkBuddy AI`），粘贴即失败 |
 | **健康探测不带令牌** | 令牌默认开启，于是 `uaa desktop` 每次都会报「服务起不来」，而服务其实好好的 |
 | **`iconutil` 要求目录名以 `.iconset` 结尾** | 起错名一律报 "Invalid Iconset"，而失败原因被吞成「iconutil 不可用」 |
 | 打包用 `rmtree` 清理中间产物 | 递归删除撞上删除护栏，打包直接崩；改成暂存目录 + rename 换入 |

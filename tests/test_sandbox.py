@@ -357,3 +357,95 @@ class TestBackendsIdentifyThemselves:
         assert first.name == second.name == SeatbeltSandbox.name == "seatbelt"
 
 
+
+
+class TestVerificationReport:
+    """`uaa sandbox --report` exists because the check cannot always run here.
+
+    macOS refuses to install a narrowing profile from an already-sandboxed
+    process, so the verification has to happen in the user's own terminal. A
+    command they have to assemble from a description is a command that does
+    not get run, and a result they have to copy back is a result that gets
+    mistyped -- so the output is a single pasteable line and the result lands
+    on disk.
+    """
+
+    def test_verdict_says_no_isolation_and_how_to_check(self) -> None:
+        from unified_agent.cli import _sandbox_verdict
+
+        selection = SandboxSelection(NoSandbox(), "auto", notes=[])
+        verdict = _sandbox_verdict(selection, ProbeResult(False, "stubbed"), [])
+        assert "NO ISOLATION ACTIVE" in verdict
+        assert "normal terminal" in verdict, "the verdict must say what to do"
+
+    def test_verdict_confirms_a_working_sandbox(self) -> None:
+        from unified_agent.cli import _sandbox_verdict
+
+        sandbox = NoSandbox()
+        sandbox.name = "seatbelt"
+        selection = SandboxSelection(sandbox, "seatbelt", notes=[])
+        live = [
+            {"label": "write outside the workspace", "ok": True, "result": "blocked", "detail": ""},
+            {"label": "read a system file", "ok": True, "result": "allowed", "detail": ""},
+        ]
+        verdict = _sandbox_verdict(selection, ProbeResult(True, "ok"), live)
+        assert "blocked a write" in verdict
+        assert "allowed reads" in verdict
+
+    def test_verdict_flags_an_escape_as_not_working(self) -> None:
+        """A sandbox that reports active but lets a write through is worse
+        than one that reports inactive: the user stops watching."""
+        from unified_agent.cli import _sandbox_verdict
+
+        sandbox = NoSandbox()
+        sandbox.name = "seatbelt"
+        selection = SandboxSelection(sandbox, "seatbelt", notes=[])
+        live = [
+            {"label": "write outside the workspace", "ok": False, "result": "ESCAPED", "detail": ""},
+            {"label": "read a system file", "ok": True, "result": "allowed", "detail": ""},
+        ]
+        verdict = _sandbox_verdict(selection, ProbeResult(True, "ok"), live)
+        assert "ESCAPED" in verdict
+        assert "not working" in verdict
+
+    def test_paths_are_quoted_for_pasting(self) -> None:
+        """Project paths routinely contain spaces; an unquoted path is a
+        command that fails the moment it is pasted."""
+        from unified_agent.cli import _sh
+
+        assert _sh("/Users/me/WorkBuddy AI/project") == "'/Users/me/WorkBuddy AI/project'"
+        assert _sh("/plain/path") == "/plain/path"
+
+    def test_the_report_round_trips(self, tmp_path: Path) -> None:
+        """The file and the printed view must be the same data."""
+        import json
+
+        from unified_agent.cli import _sandbox_verdict
+        from unified_agent.sandbox import build_sandbox
+
+        settings_home = tmp_path / "home"
+        settings_home.mkdir()
+        selection = build_sandbox("auto", home=settings_home)
+        payload = {
+            "requested": selection.requested,
+            "selected": selection.sandbox.name,
+            "isolation": selection.sandbox.isolation,
+            "fell_back": selection.fell_back,
+            "notes": selection.notes,
+            "caveats": selection.sandbox.caveats(),
+            "live_check": [],
+            "verdict": _sandbox_verdict(selection, ProbeResult(False, "stub"), []),
+        }
+        target = tmp_path / "sandbox-verify.json"
+        target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+        loaded = json.loads(target.read_text(encoding="utf-8"))
+        assert set(loaded) >= {
+            "requested",
+            "selected",
+            "isolation",
+            "fell_back",
+            "caveats",
+            "verdict",
+        }
+        assert loaded["caveats"], "the limitations must travel with the result"
