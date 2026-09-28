@@ -183,9 +183,14 @@ class Store:
     # ------------------------------------------------------------------
 
     def create_task(
-        self, *, session_id: str, goal: str, budgets: dict[str, Any] | None = None
+        self,
+        *,
+        session_id: str,
+        goal: str,
+        budgets: dict[str, Any] | None = None,
+        task_id: str | None = None,
     ) -> str:
-        tid = new_id("task")
+        tid = task_id or new_id("task")
         ts = now_iso()
         with self._lock:
             self.conn.execute(

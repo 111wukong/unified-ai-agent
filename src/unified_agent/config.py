@@ -20,6 +20,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 from unified_agent.errors import ConfigError
+from unified_agent.sandbox.base import SandboxMode
 from unified_agent.types import Decision, EffectClass
 
 # --------------------------------------------------------------------------
@@ -251,6 +252,19 @@ class McpServerConfig(BaseModel):
     startup_timeout_s: float = 30.0
 
 
+class SandboxConfig(BaseModel):
+    """Process isolation. `auto` prefers macOS Seatbelt: it is free per
+    command, and a sandbox you leave on protects more than a stronger one
+    you turn off because it costs three seconds a command."""
+
+    backend: Literal["auto", "seatbelt", "docker", "none"] = "auto"
+    mode: SandboxMode = SandboxMode.WORKSPACE_WRITE
+    extra_write_dirs: list[str] = Field(default_factory=list)
+    docker_image: str = "python:3.12-slim"
+    docker_network: str = "none"
+    docker_mounts: list[str] = Field(default_factory=list)
+
+
 class Settings(BaseModel):
     home: Path
     workspace: Path
@@ -258,6 +272,7 @@ class Settings(BaseModel):
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     permissions: PermissionConfig = Field(default_factory=PermissionConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
     skill_dirs: list[str] = Field(default_factory=lambda: ["skills"])
 
@@ -278,6 +293,10 @@ class Settings(BaseModel):
     def state_dir(self) -> Path:
         return self.home / "state"
 
+    @property
+    def sandbox_dir(self) -> Path:
+        return self.home / "sandbox"
+
     def model(self, alias: str | None = None) -> ModelSpec:
         name = alias or self.default_model
         if name not in self.models:
@@ -287,7 +306,13 @@ class Settings(BaseModel):
         return self.models[name]
 
     def ensure_dirs(self) -> None:
-        for d in (self.home, self.log_dir, self.artifact_dir, self.state_dir):
+        for d in (
+            self.home,
+            self.log_dir,
+            self.artifact_dir,
+            self.state_dir,
+            self.sandbox_dir,
+        ):
             d.mkdir(parents=True, exist_ok=True)
 
     def secret_values(self) -> list[str]:
@@ -359,6 +384,15 @@ model = "mock-react"
 [permissions.fs]
 read_roots = ["."]
 write_roots = ["."]
+
+[sandbox]
+# auto | seatbelt | docker | none
+# `auto` prefers macOS Seatbelt (sandbox-exec): zero per-command cost.
+backend = "auto"
+# read-only | workspace-write | full
+# `read-only` makes the project tree (including .git) unwritable -- use it
+# for "analyse this repo" tasks.
+mode = "workspace-write"
 
 [agent]
 max_steps = 30

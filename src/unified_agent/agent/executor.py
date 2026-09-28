@@ -185,6 +185,12 @@ class ToolRunner:
                 "name": call.name,
                 "success": result.success,
                 "error": result.error,
+                # The observation belongs here too, not only in LOG_APPENDED.
+                # A UI streaming TOOL_CALL_RESULT, and anyone reading
+                # `uaa task events`, both need the output next to the call --
+                # otherwise the result renders empty and the audit log shows
+                # that a tool ran but not what it said.
+                "observation": result.as_observation()[:4_000],
                 "step_id": step_id,
                 "attempt": attempt,
                 "duration_ms": duration_ms,

@@ -19,6 +19,7 @@ import os
 from typing import Any
 
 from unified_agent.tools.base import Tool, ToolContext, ToolSpec
+from unified_agent.sandbox.base import Sandbox, SandboxMode
 from unified_agent.tools.permissions import scrub_env
 from unified_agent.types import EffectClass, ToolResult
 
@@ -26,11 +27,11 @@ _MAX_OUTPUT = 100_000
 
 
 async def _git(
-    args: list[str], *, cwd: str, env: dict[str, str], timeout: float = 60.0
+    argv: list[str], *, cwd: str, env: dict[str, str], timeout: float = 60.0
 ) -> tuple[int, str]:
+    """`argv` is the full command line -- already sandbox-wrapped by the caller."""
     proc = await asyncio.create_subprocess_exec(
-        "git",
-        *args,
+        *argv,
         cwd=cwd,
         env=env,
         stdout=asyncio.subprocess.PIPE,
@@ -42,7 +43,7 @@ async def _git(
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        return 124, f"git {' '.join(args)} timed out after {timeout:.0f}s"
+        return 124, f"{' '.join(argv)} timed out after {timeout:.0f}s"
     text = stdout.decode("utf-8", errors="replace")
     if len(text) > _MAX_OUTPUT:
         text = text[:_MAX_OUTPUT] + f"\n[... output cut at {_MAX_OUTPUT} chars]"
@@ -50,8 +51,16 @@ async def _git(
 
 
 class _GitTool(Tool):
-    def __init__(self, *, known_secrets: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        known_secrets: list[str] | None = None,
+        sandbox: Sandbox | None = None,
+        sandbox_mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
+    ) -> None:
         self.known_secrets = known_secrets or []
+        self.sandbox = sandbox
+        self.sandbox_mode = sandbox_mode
 
     def _env(self, ctx: ToolContext) -> dict[str, str]:
         env = scrub_env(ctx.env or None, known_secrets=self.known_secrets)
@@ -69,9 +78,13 @@ class _GitTool(Tool):
     async def _run(self, args: list[str], ctx: ToolContext, timeout: float = 60.0) -> ToolResult:
         if ctx.dry_run:
             return self.dry_run({"args": args}, ctx)
-        code, text = await _git(
-            args, cwd=str(ctx.workspace), env=self._env(ctx), timeout=timeout
-        )
+        env = self._env(ctx)
+        argv = ["git", *args]
+        if self.sandbox is not None:
+            argv = self.sandbox.wrap(
+                argv, workspace=ctx.workspace, mode=self.sandbox_mode, env=env
+            )
+        code, text = await _git(argv, cwd=str(ctx.workspace), env=env, timeout=timeout)
         if code != 0 and "not a git repository" in text:
             return ToolResult(
                 success=False,
@@ -223,14 +236,20 @@ class GitCommitTool(_GitTool):
         return await self._run(["commit", "-m", str(args["message"])], ctx, timeout=120)
 
 
-def build_git_tools(*, known_secrets: list[str] | None = None) -> list[Tool]:
+def build_git_tools(
+    *,
+    known_secrets: list[str] | None = None,
+    sandbox: Sandbox | None = None,
+    sandbox_mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
+) -> list[Tool]:
     if not _git_available():
         return []
+    kwargs = {"known_secrets": known_secrets, "sandbox": sandbox, "sandbox_mode": sandbox_mode}
     return [
-        GitStatusTool(known_secrets=known_secrets),
-        GitDiffTool(known_secrets=known_secrets),
-        GitLogTool(known_secrets=known_secrets),
-        GitCommitTool(known_secrets=known_secrets),
+        GitStatusTool(**kwargs),
+        GitDiffTool(**kwargs),
+        GitLogTool(**kwargs),
+        GitCommitTool(**kwargs),
     ]
 
 

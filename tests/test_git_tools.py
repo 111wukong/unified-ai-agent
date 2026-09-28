@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -89,12 +90,22 @@ class TestReadOnlyTools:
         assert result.success
         assert "initial" in result.output
 
-    async def test_not_a_repository_is_reported_clearly(self, workspace, tmp_path) -> None:  # noqa: ANN001
+    async def test_not_a_repository_is_reported_clearly(self, tmp_path) -> None:  # noqa: ANN001
+        """The directory must be outside *any* repo, including the project's.
+
+        Using the `workspace` fixture here is wrong when the test runner's
+        temp directory lives inside a checkout: `git status` walks up, finds
+        the project's own `.git`, and succeeds. The test then asserts the
+        opposite of what it is actually exercising.
+        """
+        import tempfile
+
+        outside = Path(tempfile.mkdtemp(prefix="uaa-not-a-repo-"))
         plain = ToolContext(
             task_id="t",
             session_id="s",
             step_id="step_1",
-            workspace=workspace,
+            workspace=outside,
             home=tmp_path,
             artifact_dir=tmp_path,
         )

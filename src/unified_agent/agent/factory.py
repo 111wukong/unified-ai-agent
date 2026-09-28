@@ -10,7 +10,9 @@ from unified_agent.agent.runtime import AgentRuntime, ProgressHook
 from unified_agent.config import Settings
 from unified_agent.models.registry import ModelRegistry
 from unified_agent.observability.jsonl import JsonlSink
+from unified_agent.observability.bus import BusSink, EventBus
 from unified_agent.observability.redact import Redactor
+from unified_agent.sandbox import build_sandbox
 from unified_agent.skills.registry import SkillRegistry
 from unified_agent.storage.store import Store
 from unified_agent.tools.fs import FS_TOOLS
@@ -41,6 +43,9 @@ class Agent:
     redactor: Redactor
     sink: JsonlSink
     mcp_problems: list[str] = field(default_factory=list)
+    bus: EventBus | None = None
+    sandbox: object | None = None
+    sandbox_selection: object | None = None
 
     def close(self) -> None:
         self.sink.close()
@@ -73,7 +78,8 @@ async def build_agent(
 ) -> Agent:
     settings.ensure_dirs()
     redactor = Redactor(settings.secret_values())
-    sink = JsonlSink(settings.log_dir, redactor=redactor)
+    bus = EventBus()
+    sink = BusSink(JsonlSink(settings.log_dir, redactor=redactor), bus)
     store = store or Store(settings.db_path, redactor=redactor, sink=sink)
 
     engine = PermissionEngine(
@@ -88,15 +94,29 @@ async def build_agent(
         registry.register(tool)
 
     secrets = settings.secret_values()
+    selection = build_sandbox(
+        settings.sandbox.backend,
+        home=settings.home,
+        extra_write_dirs=settings.sandbox.extra_write_dirs,
+        docker_image=settings.sandbox.docker_image,
+        docker_network=settings.sandbox.docker_network,
+        docker_mounts=settings.sandbox.docker_mounts,
+    )
+    sandbox = selection.sandbox
     for tool in build_shell_tools(
-        known_secrets=secrets, timeout_s=settings.permissions.shell.default_timeout_s
+        known_secrets=secrets,
+        timeout_s=settings.permissions.shell.default_timeout_s,
+        sandbox=sandbox,
+        sandbox_mode=settings.sandbox.mode,
     ):
         registry.register(tool)
     for tool in build_net_tools(allow_check=lambda url: engine.check_url(url).allowed):
         registry.register(tool)
     for tool in build_memory_tools(store):
         registry.register(tool)
-    for tool in build_git_tools(known_secrets=secrets):
+    for tool in build_git_tools(
+        known_secrets=secrets, sandbox=sandbox, sandbox_mode=settings.sandbox.mode
+    ):
         registry.register(tool)
     registry.register(UpdatePlanTool())
     registry.register(FinishTool())
@@ -129,6 +149,7 @@ async def build_agent(
         models=models,
         skills=skills,
         on_progress=on_progress,
+        bus=bus,
     )
     return Agent(
         settings=settings,
@@ -141,6 +162,9 @@ async def build_agent(
         redactor=redactor,
         sink=sink,
         mcp_problems=mcp_problems,
+        bus=bus,
+        sandbox=sandbox,
+        sandbox_selection=selection,
     )
 
 

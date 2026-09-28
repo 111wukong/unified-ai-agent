@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>unified-ai-agent console</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <header>
+      <h1>uaa</h1>
+      <span id="version" class="dim"></span>
+    </header>
+
+    <section class="panel">
+      <h2>Run</h2>
+      <label class="field">
+        <span>model</span>
+        <input id="model" value="mock" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>pre-approve</span>
+        <select id="approve" multiple size="4">
+          <option value="read_only">read_only</option>
+          <option value="write_local">write_local</option>
+          <option value="execute_local">execute_local</option>
+          <option value="network">network</option>
+          <option value="external_side_effect">external_side_effect</option>
+        </select>
+      </label>
+      <p class="hint">system_admin can never be granted from the browser.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Sandbox</h2>
+      <div id="sandbox" class="kv dim">loading…</div>
+    </section>
+
+    <section class="panel grow">
+      <h2>Tasks</h2>
+      <div id="tasks" class="task-list"></div>
+    </section>
+
+    <footer>
+      <a href="/docs" target="_blank" rel="noreferrer">API docs</a>
+      <span class="dim">·</span>
+      <a href="/api/v1/tools" target="_blank" rel="noreferrer">tools</a>
+    </footer>
+  </aside>
+
+  <main id="main">
+    <div id="transcript"></div>
+
+    <div id="approval" class="approval hidden">
+      <div class="approval-head">
+        <strong>Approval required</strong>
+        <span id="approval-effect" class="chip"></span>
+      </div>
+      <pre id="approval-preview"></pre>
+      <div id="approval-detail" class="dim"></div>
+      <div class="approval-actions">
+        <button id="btn-approve" class="primary">Approve</button>
+        <button id="btn-deny" class="danger">Refuse</button>
+      </div>
+    </div>
+
+    <form id="composer">
+      <textarea id="goal" rows="2" placeholder="Describe a task…  (Enter to send, Shift+Enter for a newline)"></textarea>
+      <div class="composer-actions">
+        <span id="status" class="dim">idle</span>
+        <button id="btn-send" type="submit" class="primary">Send</button>
+        <button id="btn-cancel" type="button" class="ghost" disabled>Cancel</button>
+      </div>
+    </form>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

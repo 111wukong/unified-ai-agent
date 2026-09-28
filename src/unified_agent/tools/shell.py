@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from unified_agent.errors import ToolError
+from unified_agent.sandbox.base import Sandbox, SandboxMode
 from unified_agent.tools.base import Tool, ToolContext, ToolSpec
 from unified_agent.tools.permissions import scrub_env
 from unified_agent.types import EffectClass, ToolResult
@@ -106,9 +107,18 @@ class RunCommandTool(Tool):
         idempotent=False,
     )
 
-    def __init__(self, *, known_secrets: list[str] | None = None, default_timeout_s: float = 120.0):
+    def __init__(
+        self,
+        *,
+        known_secrets: list[str] | None = None,
+        default_timeout_s: float = 120.0,
+        sandbox: Sandbox | None = None,
+        sandbox_mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
+    ):
         self.known_secrets = known_secrets or []
         self.default_timeout_s = default_timeout_s
+        self.sandbox = sandbox
+        self.sandbox_mode = sandbox_mode
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         command = args["command"]
@@ -135,6 +145,12 @@ class RunCommandTool(Tool):
             overrides={"PYTHONUNBUFFERED": "1"},
         )
         env = _with_venv_on_path(env, ctx.workspace)
+        if self.sandbox is not None:
+            # The sandbox rewrites the argv, it does not replace the policy
+            # engine: path fence and command guard already ran.
+            argv = self.sandbox.wrap(
+                argv, workspace=ctx.workspace, mode=self.sandbox_mode, env=env
+            )
         try:
             code, output, elapsed = await _exec(argv, cwd=cwd, env=env, timeout_s=timeout_s)
         except ToolError as exc:
@@ -175,8 +191,16 @@ class RunTestsTool(Tool):
         idempotent=False,
     )
 
-    def __init__(self, *, known_secrets: list[str] | None = None):
-        self._runner = RunCommandTool(known_secrets=known_secrets)
+    def __init__(
+        self,
+        *,
+        known_secrets: list[str] | None = None,
+        sandbox: Sandbox | None = None,
+        sandbox_mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
+    ):
+        self._runner = RunCommandTool(
+            known_secrets=known_secrets, sandbox=sandbox, sandbox_mode=sandbox_mode
+        )
 
     def detect(self, workspace: Path) -> list[str]:
         venv_bin = find_venv_bin(workspace)
@@ -225,8 +249,16 @@ class RunLinterTool(Tool):
         idempotent=False,
     )
 
-    def __init__(self, *, known_secrets: list[str] | None = None):
-        self._runner = RunCommandTool(known_secrets=known_secrets)
+    def __init__(
+        self,
+        *,
+        known_secrets: list[str] | None = None,
+        sandbox: Sandbox | None = None,
+        sandbox_mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
+    ):
+        self._runner = RunCommandTool(
+            known_secrets=known_secrets, sandbox=sandbox, sandbox_mode=sandbox_mode
+        )
 
     def detect(self, workspace: Path) -> list[str]:
         venv_bin = find_venv_bin(workspace)
@@ -253,9 +285,18 @@ class RunLinterTool(Tool):
         )
 
 
-def build_shell_tools(*, known_secrets: list[str] | None = None, timeout_s: float = 120.0) -> list[Tool]:
+def build_shell_tools(
+    *,
+    known_secrets: list[str] | None = None,
+    timeout_s: float = 120.0,
+    sandbox: Sandbox | None = None,
+    sandbox_mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
+) -> list[Tool]:
+    kwargs = {"sandbox": sandbox, "sandbox_mode": sandbox_mode}
     return [
-        RunCommandTool(known_secrets=known_secrets, default_timeout_s=timeout_s),
-        RunTestsTool(known_secrets=known_secrets),
-        RunLinterTool(known_secrets=known_secrets),
+        RunCommandTool(
+            known_secrets=known_secrets, default_timeout_s=timeout_s, **kwargs
+        ),
+        RunTestsTool(known_secrets=known_secrets, **kwargs),
+        RunLinterTool(known_secrets=known_secrets, **kwargs),
     ]

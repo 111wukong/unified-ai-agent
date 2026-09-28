@@ -36,6 +36,7 @@ from unified_agent.agent.state import (
 from unified_agent.config import Settings
 from unified_agent.errors import ConfirmationRequired, ModelError
 from unified_agent.models.registry import ModelRegistry
+from unified_agent.observability.bus import EventBus
 from unified_agent.observability.events import EventType
 from unified_agent.tools.base import ToolContext
 from unified_agent.tools.permissions import PermissionEngine, scrub_env
@@ -75,6 +76,7 @@ class AgentRuntime:
         skills: Any = None,
         summarizer: Any = None,
         on_progress: ProgressHook | None = None,
+        bus: EventBus | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
@@ -83,6 +85,7 @@ class AgentRuntime:
         self.models = models
         self.skills = skills
         self.on_progress = on_progress
+        self.bus = bus
         self._runner = ToolRunner(
             registry=registry,
             engine=engine,
@@ -103,7 +106,10 @@ class AgentRuntime:
         model_alias: str | None = None,
         approved_effects: list[EffectClass] | None = None,
         max_steps: int | None = None,
+        task_id: str | None = None,
     ) -> AgentResult:
+        """`task_id` lets a caller subscribe to the event stream *before* the
+        task exists. Without it the SSE endpoint races the first events."""
         model = self.models.get(model_alias)
         self._model = model
         effects = [e.value for e in (approved_effects or [])]
@@ -117,7 +123,9 @@ class AgentRuntime:
             "approved_effects": effects,
             "model": model_alias or self.settings.default_model,
         }
-        task_id = self.store.create_task(session_id=session_id, goal=goal, budgets=budgets)
+        task_id = self.store.create_task(
+            session_id=session_id, goal=goal, budgets=budgets, task_id=task_id
+        )
         state = AgentState(
             task_id=task_id,
             session_id=session_id,
@@ -292,8 +300,13 @@ class AgentRuntime:
             messages = self._context.build(state, memory_block=memory_block)
 
             # --- model call --------------------------------------------
+            # One id per assistant turn, so the AG-UI encoder can correlate
+            # the ephemeral text deltas with the durable MODEL_RESPONSE event.
+            message_id = f"msg_{uuid.uuid4().hex[:12]}"
             try:
-                resp = await self._call_model(messages)
+                resp = await self._call_model(
+                    messages, stream=self._stream_callback(state.task_id, message_id)
+                )
             except ModelError as exc:
                 return self._fail(state, f"model call failed: {exc}", started)
             state.model_calls += 1
@@ -303,6 +316,7 @@ class AgentRuntime:
                 EventType.MODEL_RESPONSE,
                 {
                     "phase": "step",
+                    "message_id": message_id,
                     "model": resp.model,
                     "usage": resp.usage.model_dump(),
                     "tool_calls": [tc.name for tc in resp.tool_calls],
@@ -402,13 +416,30 @@ class AgentRuntime:
             return self._result(state, duration=0.0)
         return self._complete(state, answer, time.time())
 
-    async def _call_model(self, messages: list) -> Any:
+    def _stream_callback(self, task_id: str, message_id: str):
+        """Only stream when someone is listening.
+
+        Without the subscriber check, every run pays the SSE parsing cost in
+        the provider adapter for output nobody reads.
+        """
+        bus = self.bus
+        if bus is None or not bus.has_subscribers(task_id):
+            return None
+
+        def on_delta(text: str) -> None:
+            bus.publish_delta(task_id, message_id=message_id, text=text)
+
+        return on_delta
+
+    async def _call_model(self, messages: list, *, stream: Any = None) -> Any:
         model = self._model
         attempts = max(1, self.settings.agent.model_retry_attempts)
         last: ModelError | None = None
         for attempt in range(attempts):
             try:
-                return await model.chat(messages, tools=self.registry.specs())
+                return await model.chat(
+                    messages, tools=self.registry.specs(), stream=stream
+                )
             except ModelError as exc:
                 last = exc
                 if not exc.retryable or attempt == attempts - 1:

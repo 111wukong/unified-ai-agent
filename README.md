@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-209%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-266%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -11,6 +11,8 @@
 uaa init
 uaa run --model mock "查看当前目录下的 Python 文件并总结"   # 离线，不需要任何 API key
 uaa run "分析认证模块并补充测试"                            # 用真实模型
+uaa serve                                                   # HTTP + WebSocket + Web 控制台
+uaa sandbox                                                 # 报告进程隔离实际是否生效
 ```
 
 ---
@@ -185,6 +187,12 @@ src/unified_agent/
 │   ├── mcp.py          MCP stdio 客户端（双协议时代）
 │   ├── memory_tools.py save_memory / search_memory / load_skill / update_plan / finish
 │   └── registry.py
+├── api/
+│   ├── app.py          FastAPI：REST + AG-UI(SSE) + WebSocket + 控制台挂载
+│   ├── agui.py         AG-UI 编码器（内部事件 → 协议事件）
+│   └── console/        零构建 Web 控制台（原生 JS/CSS）
+├── sandbox/
+│   └── base.py         Seatbelt / Docker / None，探测式可用性 + 回退留痕
 ├── models/
 │   ├── base.py         ChatModel / ModelCapabilities / 文本协议降级
 │   ├── openai_compat.py
@@ -217,6 +225,69 @@ requires_confirmation = true
 
 ---
 
+## 服务层：AG-UI，不是自造的 WebSocket 格式
+
+```bash
+uaa serve                      # 控制台 http://127.0.0.1:8000/
+```
+
+前端协议直接实现 **AG-UI**（CopilotKit 与 LangGraph / Mastra / Pydantic AI / Microsoft Agent Framework 共用的开放标准），而不是自己发明一套 WebSocket 消息格式。收益是具体的：控制台可以随时换成 CopilotKit 的 React 组件，后端一行不改。
+
+三类事件模式，覆盖了 Agent 前端的全部需求：
+
+```
+RUN_STARTED / STEP_STARTED / STEP_FINISHED / RUN_FINISHED / RUN_ERROR
+TEXT_MESSAGE_START / CONTENT / END          ← 逐 token 流式
+TOOL_CALL_START / ARGS / END / RESULT
+ACTIVITY_SNAPSHOT (activityType="PLAN")     ← 计划直接渲染成卡片
+STATE_SNAPSHOT / STATE_DELTA (RFC 6902)
+CUSTOM (usage / context_compacted / tool_ambiguous …)
+```
+
+**人工确认不是单独的事件**，而是 `RUN_FINISHED` 的 `outcome`：
+
+```json
+{ "type": "interrupt", "interrupts": [ { "id": "...", "tool": "run_command", ... } ] }
+```
+
+这样前端只有一个终止事件要处理，而不是「等 RUN_FINISHED，但它不来怎么办」。
+
+三个容易写错的地方，本实现明确处理了：
+
+- **deltas 与最终消息不能都发。** 已经流过 token 的消息，durable 事件只负责关闭它；晚连的订阅者才需要整段文本。编码器记录哪些 messageId 流过。
+- **SSE 与 WebSocket 共用同一个生成器。** 两份实现正是 WebSocket 那条路漏掉「回放历史」然后永久挂住的原因。
+- **`POST /agui` 先订阅再启动任务。** 反过来会和前几个事件竞态，控制台会渲染出空计划。
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/agui \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"分析这个项目"}]}'
+```
+
+---
+
+## 进程隔离：macOS 用 Seatbelt，Docker 作为可选后端
+
+```bash
+uaa sandbox        # 报告实际生效的是哪个后端，并真的试一次越界写入
+```
+
+`uaa config set sandbox.mode read-only` 会让**项目目录含 `.git` 全部只读** —— `git log/diff/show/blame` 能用，`commit/checkout/fetch` 和文件编辑全部失败。**「分析这个项目」和「修改这个项目」是两个不同的档位**，不该共用一份权限配置。
+
+威胁模型是抄 Codex / Gemini CLI 的，而且理由充分：
+
+> **anti-tampering, not anti-exfiltration** —— 读是全开的，锁的是写。
+
+Agent 必须读代码、读配置、读工具链；读也锁死它就废了。而「写」可以精确白名单。
+
+**可用性是探测出来的，不是假定的。** 二进制存在不等于能用：在已经被沙箱化的进程里，macOS **拒绝**安装一个更窄的 profile。所以 `available` 会真的去应用一个限制性 profile 试一次——用 `(allow default)` 探测是无效的，那在任何环境都通过，正好掩盖了要防的失败。
+
+**回退一定留痕。** `wrap()` 在后端不可用时会直通（不能让坏沙箱废掉所有命令），但 `uaa run/chat/serve/doctor` 都会打出告警。静默降级到无隔离，比没有隔离更糟。
+
+诚实的限制，`uaa sandbox` 会全部打出来：网络是放开的（**不是出口防火墙**）；`npm login`/`gh auth login` 在沙箱内会失败（它们要**写**凭据文件）；macOS 的 Keychain 经 Mach IPC 的写入挡不住；`sandbox-exec` 被 Apple 标记为弃用。
+
+---
+
 ## 安全边界（明确说明）
 
 - API key **只**从环境变量读，从不写盘。
@@ -234,10 +305,12 @@ requires_confirmation = true
 
 | 阶段 | 内容 |
 |---|---|
-| Phase 2 | FastAPI + WebSocket、任务取消的跨进程协调、Docker 沙箱 |
-| Phase 3 | 向量检索（LanceDB）、技能审核 CLI 的完整流程 |
-| Phase 4 | 声明式 YAML 工作流、多 Agent（角色/消息/并行）、A2A |
-| Phase 5 | TypeScript SDK、Web 控制台、Telegram/Discord 适配器 |
+| Phase 2 | ✅ FastAPI + SSE/WebSocket（AG-UI）、✅ 沙箱（Seatbelt / Docker） |
+| Phase 3 | ⏸ 向量记忆与矛盾处理（设计已定：Mem0 抽取 + Zep 失效语义）、技能审核流程 |
+| Phase 4 | ⏸ YAML 工作流（Dify 形状）、多 Agent（orchestrator-worker）、A2A v1.0 |
+| Phase 5 | ✅ Web 控制台（零构建）、⏸ TypeScript SDK、渠道适配器 |
+
+调研与采纳决策见 [`docs/phase2-5-research.md`](docs/phase2-5-research.md)。
 
 多 Agent 明确不在第一版：token 消耗增加、调试困难、状态同步复杂、错误责任不清。**AutoGen 的 5–6× token 成本就来自每个 agent 每轮一次 LLM 调用** —— 本项目的反思只在任务结束后调一次，也是同一个理由。
 
@@ -248,7 +321,7 @@ requires_confirmation = true
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 209 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 266 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -272,6 +345,11 @@ requires_confirmation = true
 | **Rich 把输出里的 `[a-zA-Z]` 当成标记吃掉** | 正则、pytest 的 `[100%]`、TOML 的 `[models.x]` 全部静默变形 |
 | `run_tests` 在 venv 项目里找不到 pytest | 环境脱敏顺带把 venv 的 PATH 也清了 |
 | JSONL 日志建了 sink 但没接线 | 事件日志永远是空的 |
+| **事件总线的 `publish` 被当成 `emit` 调用，异常被吞** | 事件一条都进不了总线，SSE 流永远空转 |
+| **AG-UI 编码器返回 dict，调用方按 list 迭代** | `for x in dict` 迭代的是键 —— `RUN_FINISHED` 从未发出，线上只有 `data: "type"` |
+| `@dataclass` 默认 `eq=True` 使订阅者不可哈希 | 加进 `set` 直接崩；测试全绿是因为没人订阅 |
+| WebSocket 只转发实时事件、不回放历史 | 晚连的客户端永远挂住 |
+| 沙箱不可用时 `wrap` 静默直通 | 用户配了 Seatbelt 却在裸跑，没人告诉他 |
 
 ## License
 

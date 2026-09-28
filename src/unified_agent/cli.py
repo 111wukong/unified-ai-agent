@@ -128,6 +128,21 @@ def _progress_printer(quiet: bool):
     return hook
 
 
+def _warn_about_sandbox(agent, *, quiet: bool = False) -> None:
+    """Say it out loud when isolation is weaker than configured.
+
+    `sandbox.wrap()` deliberately no-ops when the backend is unavailable, so
+    a user who configured Seatbelt would otherwise run unsandboxed without
+    ever being told.
+    """
+    if quiet:
+        return
+    selection = getattr(agent, "sandbox_selection", None)
+    warning = selection.warning() if selection is not None else None
+    if warning:
+        err_console.print(f"[yellow]sandbox[/yellow]: {escape(warning)}")
+
+
 def _print_result(result, *, quiet: bool = False) -> None:
     if result.needs_approval:
         pending = result.pending_confirmation
@@ -265,6 +280,23 @@ def doctor(
         if settings.permissions.network.allow_all
         else f"{len(settings.permissions.network.allow_domains)} domain(s)",
     )
+    from unified_agent.sandbox import build_sandbox
+
+    selection = build_sandbox(
+        settings.sandbox.backend,
+        home=settings.home,
+        extra_write_dirs=settings.sandbox.extra_write_dirs,
+        docker_image=settings.sandbox.docker_image,
+        docker_network=settings.sandbox.docker_network,
+        docker_mounts=settings.sandbox.docker_mounts,
+    )
+    table.add_row(
+        "sandbox",
+        f"[green]{selection.sandbox.name}[/green] "
+        f"({selection.sandbox.isolation}) mode={settings.sandbox.mode.value}",
+    )
+    if warning := selection.warning():
+        table.add_row("sandbox warning", f"[yellow]{escape(warning)}[/yellow]")
     table.add_row(
         "sensitive paths",
         f"denies ~/.ssh, .env, *.pem — sample: {engine.paths.is_sensitive(settings.home / '.ssh' / 'id_rsa')}",
@@ -415,6 +447,7 @@ def run(
             cli_approvals=tuple(effects),
         )
         try:
+            _warn_about_sandbox(agent, quiet=quiet or as_json)
             session_id = agent.store.ensure_session(
                 name=session or "default",
                 working_dir=str(settings.workspace),
@@ -467,6 +500,7 @@ def chat(
             cli_approvals=effects,
         )
         try:
+            _warn_about_sandbox(agent)
             session_id = agent.store.ensure_session(
                 name=session,
                 working_dir=str(settings.workspace),
@@ -883,6 +917,146 @@ def skill_show(
         raise typer.Exit(1)
     # Skill bodies are Markdown with [links](url) -- markup=False keeps them.
     console.print(skill.render(), markup=False)
+
+
+# ---------------------------------------------------------------------------
+# sandbox / serve
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def sandbox(
+    backend: str = typer.Option("auto", "--backend", help="auto | seatbelt | docker | none"),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Report which process-isolation backend is actually active, and prove it.
+
+    Run this from a normal terminal. Inside another sandbox (a container, or
+    a nested-sandbox environment) macOS refuses to apply a narrowing Seatbelt
+    profile, so the probe fails there even though it would work for you.
+    """
+    from unified_agent.sandbox import build_sandbox, seatbelt_probe
+
+    settings = _settings(home, workspace)
+    settings.ensure_dirs()
+
+    probe = seatbelt_probe()
+    console.print("[bold]probe[/bold]")
+    console.print(f"  seatbelt: {'[green]ok[/green]' if probe.ok else '[red]unavailable[/red]'}")
+    console.print(f"    {escape(probe.detail)}")
+
+    selection = build_sandbox(
+        backend,
+        home=settings.home,
+        extra_write_dirs=settings.sandbox.extra_write_dirs,
+        docker_image=settings.sandbox.docker_image,
+        docker_network=settings.sandbox.docker_network,
+        docker_mounts=settings.sandbox.docker_mounts,
+    )
+    console.print()
+    console.print("[bold]selection[/bold]")
+    for line in selection.summary().splitlines():
+        console.print(f"  {escape(line)}")
+
+    console.print()
+    console.print("[bold]limits[/bold]  (read these before trusting it)")
+    for caveat in selection.sandbox.caveats():
+        console.print(f"  - {escape(caveat)}")
+
+    if selection.sandbox.name == "seatbelt":
+        console.print()
+        console.print("[bold]live check[/bold]  (writes outside the allowlist must fail)")
+        _sandbox_live_check(selection.sandbox, settings.workspace, settings.sandbox.mode)
+
+
+def _sandbox_live_check(sandbox: object, workspace: Path, mode: object) -> None:
+    """Actually attempt an escape. A report that never tries is worthless."""
+    import asyncio
+    import tempfile
+
+    from unified_agent.tools.base import ToolContext
+    from unified_agent.tools.shell import RunCommandTool
+
+    async def _run() -> list[tuple[str, bool, str]]:
+        outside = Path(tempfile.mkdtemp(prefix="uaa-sbx-"))
+        target = outside / "escape.txt"
+        ctx = ToolContext(
+            task_id="probe",
+            session_id="probe",
+            step_id="step_1",
+            workspace=workspace,
+            home=sandbox.home,  # type: ignore[attr-defined]
+            artifact_dir=outside,
+        )
+        tool = RunCommandTool(sandbox=sandbox, sandbox_mode=mode)  # type: ignore[arg-type]
+        rows: list[tuple[str, bool, str]] = []
+
+        result = await tool.run({"command": f"touch {target}"}, ctx)
+        rows.append(("write outside the workspace", target.exists(), result.error or ""))
+        result = await tool.run({"command": "cat /etc/hosts"}, ctx)
+        rows.append(("read a system file", result.success, result.error or ""))
+        return rows
+
+    for label, escaped, detail in asyncio.run(_run()):
+        if label.startswith("write"):
+            mark = "[red]ESCAPED[/red]" if escaped else "[green]blocked[/green]"
+        else:
+            mark = "[green]allowed[/green]" if escaped else "[red]blocked[/red]"
+        suffix = f"  [dim]{escape(str(detail)[:80])}[/dim]" if detail else ""
+        console.print(f"  {label}: {mark}{suffix}")
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port"),
+    reload: bool = typer.Option(False, "--reload"),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Start the HTTP/WebSocket service and the web console.
+
+    `POST /agui` speaks the AG-UI protocol over SSE; the console at `/`
+    consumes it. Bind to 127.0.0.1 by default: this service can execute
+    commands, so exposing it is a deliberate decision, not a default.
+    """
+    try:
+        import uvicorn
+    except ImportError as exc:  # pragma: no cover
+        err_console.print(
+            "the API needs fastapi and uvicorn: pip install -e \".[api]\""
+        )
+        raise typer.Exit(2) from exc
+
+    from unified_agent.api.app import create_app
+    from unified_agent.sandbox import build_sandbox
+
+    settings = _settings(home, workspace)
+    settings.ensure_dirs()
+    application = create_app(settings)
+
+    selection = build_sandbox(
+        settings.sandbox.backend,
+        home=settings.home,
+        extra_write_dirs=settings.sandbox.extra_write_dirs,
+        docker_image=settings.sandbox.docker_image,
+        docker_network=settings.sandbox.docker_network,
+        docker_mounts=settings.sandbox.docker_mounts,
+    )
+    console.print(f"sandbox: [cyan]{selection.sandbox.describe()}[/cyan]")
+    if warning := selection.warning():
+        console.print(f"[yellow]warning[/yellow]: {escape(warning)}")
+
+    console.print(f"console: [cyan]http://{host}:{port}/[/cyan]")
+    console.print(f"api docs: [cyan]http://{host}:{port}/docs[/cyan]")
+    console.print(f"ag-ui:   [cyan]POST http://{host}:{port}/agui[/cyan]  (SSE)")
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        console.print(
+            "[bold yellow]warning[/bold yellow]: bound to a non-loopback address. "
+            "This service can execute commands on this machine."
+        )
+    uvicorn.run(application, host=host, port=port, reload=reload, log_level="info")
 
 
 # ---------------------------------------------------------------------------
