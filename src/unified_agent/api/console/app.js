@@ -41,6 +41,7 @@ function el(tag, className, text) {
 }
 
 function addTurn(kind, title) {
+  $("empty")?.classList.add("hidden");
   const turn = el("div", `turn ${kind}`);
   const head = el("div", "turn-head");
   head.append(el("span", "", title));
@@ -50,10 +51,107 @@ function addTurn(kind, title) {
   return turn;
 }
 
+function clearTranscript() {
+  $("transcript").replaceChildren($("empty"));
+  $("empty")?.classList.remove("hidden");
+}
+
 function setStatus(text, busy = false) {
   const node = $("status");
   node.textContent = text;
   node.classList.toggle("busy", busy);
+  // Also exposed as a data attribute so the colour can follow the state
+  // rather than the wording -- "waiting_confirmation" should look like a
+  // warning, and it should keep looking like one if the label is reworded.
+  node.dataset.state = String(text || "idle");
+}
+
+/* Effects the UI may grant. SYSTEM_ADMIN is absent on purpose: the server
+   refuses it too, and offering a control that always fails is worse than not
+   offering it. */
+const GRANTABLE = [
+  "read_only",
+  "write_local",
+  "execute_local",
+  "network",
+  "external_side_effect",
+];
+
+function buildApprovalToggles() {
+  const box = $("approve");
+  box.replaceChildren();
+  for (const effect of GRANTABLE) {
+    const button = el("button", "toggle", effect);
+    button.type = "button";
+    // aria-pressed, not a class: the state has to be visible to a screen
+    // reader and to the CSS, and a native multi-select could not say it at all.
+    button.setAttribute("aria-pressed", "false");
+    button.onclick = () => {
+      const on = button.getAttribute("aria-pressed") === "true";
+      button.setAttribute("aria-pressed", on ? "false" : "true");
+    };
+    box.append(button);
+  }
+}
+
+function approvedEffects() {
+  return [...$("approve").querySelectorAll('.toggle[aria-pressed="true"]')].map(
+    (button) => button.textContent,
+  );
+}
+
+function statusChip(status) {
+  const tone =
+    {
+      completed: "chip-ok",
+      failed: "chip-danger",
+      cancelled: "chip-danger",
+      waiting_confirmation: "chip-warn",
+      running: "chip-accent",
+      planning: "chip-accent",
+      pending: "chip-accent",
+    }[status] || "";
+  // Short label, full value in the tooltip. `waiting_confirmation` is a wire
+  // value; as a UI label it is both long and jargon, and it wrapped the row.
+  const label =
+    {
+      waiting_confirmation: "waiting",
+      completed: "done",
+    }[status] || status;
+  const chip = el("span", `chip ${tone}`.trim(), label);
+  chip.title = status;
+  return chip;
+}
+
+/* Show the approval panel for a task that is *already* waiting.
+ *
+ * The panel used to appear only when a live run reported an interrupt, so a
+ * task paused before you opened the page showed its plan and nothing else --
+ * no prompt, no buttons, no way to approve it. Attaching to a task is a
+ * different path from running one, and it needs the same affordance. */
+async function syncApproval(taskId) {
+  if (!taskId) return;
+  try {
+    const task = await json(`/api/v1/tasks/${taskId}`);
+    const pending = task.pending_confirmation;
+    if (pending) {
+      showApproval({
+        effect: pending.effect,
+        preview: pending.preview,
+        detail: pending.reason,
+        id: pending.request_id,
+      });
+      setStatus("waiting_confirmation", false);
+      $("btn-cancel").disabled = false;
+      // The panel is content. Leaving "No task running" above it contradicts
+      // what the panel says and reads as a bug.
+      $("empty")?.classList.add("hidden");
+    } else {
+      hideApproval();
+    }
+  } catch {
+    /* the task detail is a nicety; failing to read it must not break attach */
+  }
 }
 
 function authHeaders(extra) {
@@ -114,7 +212,9 @@ function renderEvent(event) {
     case "TOOL_CALL_START": {
       const node = el("div", "tool running");
       const head = el("div", "tool-head");
-      head.append(el("span", "chip", "tool"), el("span", "", event.toolCallName));
+      // The name is the label. A chip reading "tool" next to the tool's own
+      // name says nothing and costs a line of visual noise on every call.
+      head.append(el("span", "chip", event.toolCallName));
       node.append(head);
       run.assistant.append(node);
       run.tools.set(event.toolCallId, node);
@@ -135,7 +235,7 @@ function renderEvent(event) {
       if (node) {
         node.classList.remove("running");
         const ok = !event.metadata || event.metadata.success !== false;
-        node.classList.add(ok ? "ok" : "bad");
+        node.classList.add(ok ? "ok" : "failed");
         const details = el("details");
         details.append(el("summary", "", ok ? "result" : "failed"));
         details.append(el("pre", "", String(event.content ?? "").slice(0, 4000)));
@@ -154,11 +254,15 @@ function renderEvent(event) {
         run.assistant.append(wrapper);
       }
       run.plan.replaceChildren();
-      const marks = { pending: " ", running: "~", completed: "x", failed: "!", skipped: "-" };
+      const marks = { pending: "○", running: "◐", completed: "●", failed: "✕", skipped: "—" };
       for (const [i, step] of (event.content.steps || []).entries()) {
-        const row = el("div", `plan-step ${step.status || "pending"}`);
-        row.append(el("span", "mark", marks[step.status] || " "));
-        row.append(el("span", "", `${i + 1}. ${step.description}`));
+        const status = step.status || "pending";
+        const row = el("div", `plan-step ${status}`);
+        // The glyph carries the status; the number carries the order. Both
+        // are fixed-width so the descriptions line up in a column.
+        row.append(el("span", "mark", marks[status] || "○"));
+        row.append(el("span", "num", String(i + 1)));
+        row.append(el("span", "step-text", step.description));
         run.plan.append(row);
       }
       break;
@@ -323,7 +427,7 @@ async function send(goal) {
   addTurn("user", "you").append(el("div", "body", goal));
   state.current = newRun();
 
-  const approve = [...$("approve").selectedOptions].map((o) => o.value);
+  const approve = approvedEffects();
   try {
     await streamRun({
       threadId: state.threadId,
@@ -375,21 +479,28 @@ async function refreshTasks() {
     const tasks = await json("/api/v1/tasks?limit=15");
     const list = $("tasks");
     list.replaceChildren();
+    $("task-count").textContent = tasks.length ? String(tasks.length) : "";
+    if (!tasks.length) {
+      list.append(el("div", "task-empty", "Nothing yet."));
+    }
     for (const task of tasks) {
       const item = el("div", "task-item" + (task.id === state.taskId ? " active" : ""));
-      item.append(el("span", "goal", task.goal));
-      item.append(
-        el(
-          "span",
-          "meta",
-          `${task.status} · ${task.steps_used} steps · ${task.tokens_in + task.tokens_out} tok`
-        )
+      item.append(el("div", "task-goal", task.goal));
+      const meta = el("div", "task-meta");
+      meta.append(statusChip(task.status));
+      meta.append(
+        el("span", "", `${task.steps_used} steps · ${task.tokens_in + task.tokens_out} tok`),
       );
+      item.append(meta);
       item.onclick = async () => {
         state.taskId = task.id;
-        $("transcript").replaceChildren();
+        clearTranscript();
         state.current = newRun();
-        await attach(task.id);
+        // Order matters: `attach` opens an SSE stream and does not resolve
+        // until the stream ends, so anything awaited after it never runs.
+        // Read the approval state first, then start streaming.
+        await syncApproval(task.id);
+        attach(task.id).catch((error) => console.warn("attach failed", error));
         refreshTasks();
       };
       list.append(item);
@@ -401,7 +512,47 @@ async function refreshTasks() {
   }
 }
 
+/* The sandbox report used to be one joined string, which wrapped into a wall
+   of prose that pushed everything else off the panel. It is structured data:
+   show it as rows, and put the caveats in a block that reads as a caveat. */
+
+function sandboxRow(key, value, tone) {
+  const row = el("div", "sandbox-row");
+  row.append(el("span", "sandbox-key", key));
+  row.append(tone ? el("span", `chip ${tone}`, value) : el("span", "sandbox-val", value));
+  return row;
+}
+
+function renderSandbox(sandbox) {
+  const box = $("sandbox");
+  box.replaceChildren();
+  const isolated = sandbox.backend && sandbox.backend !== "none";
+  box.append(sandboxRow("Backend", sandbox.backend || "none", isolated ? "chip-ok" : "chip-warn"));
+  box.append(sandboxRow("Isolation", sandbox.isolation || "none"));
+
+  const notes = sandbox.notes || [];
+  if (!isolated) {
+    // The one-line version of the caveat. It is the thing a user needs to
+    // know, and it has to be visible without expanding anything.
+    box.append(
+      el("div", "sandbox-alert", "Commands run without OS isolation. The path fence and command guard still apply."),
+    );
+  }
+  if (notes.length) {
+    // Collapsed: these are three paragraphs of explanation, and a sidebar is
+    // not the place to read them. Available, not in the way.
+    const details = el("details", "sandbox-why");
+    details.append(el("summary", "", `why? (${notes.length})`));
+    const list = el("ul");
+    for (const note of notes) list.append(el("li", "", note));
+    details.append(list);
+    box.append(details);
+  }
+}
+
 async function boot() {
+  buildApprovalToggles();
+
   try {
     const health = await json("/api/v1/health");
     $("version").textContent = health.version;
@@ -421,20 +572,22 @@ async function boot() {
   } catch { /* the console still works without /health */ }
 
   try {
-    const sandbox = await json("/api/v1/sandbox");
-    const lines = [
-      `backend: ${sandbox.backend}`,
-      `isolation: ${sandbox.isolation}`,
-      sandbox.fell_back ? `requested ${sandbox.requested} — fell back` : null,
-      ...(sandbox.notes || []),
-    ].filter(Boolean);
-    $("sandbox").textContent = lines.join("\n");
-    $("sandbox").classList.toggle("warn", sandbox.backend === "none");
+    renderSandbox(await json("/api/v1/sandbox"));
   } catch {
-    $("sandbox").textContent = "unavailable";
+    $("sandbox").replaceChildren(el("div", "sandbox-val", "unavailable"));
   }
 
-  refreshTasks();
+  await refreshTasks();
+  // Open the most recent task on load, so the page shows where you left off
+  // instead of an empty pane above a task list that has things in it.
+  if (state.taskId) {
+    state.current = newRun();
+    // `attach` is a long-lived SSE stream and does not resolve until it ends,
+    // so it is deliberately not awaited: awaiting it here meant everything
+    // after it -- including the approval panel -- never ran.
+    await syncApproval(state.taskId);
+    attach(state.taskId).catch((error) => console.warn("attach failed", error));
+  }
   setInterval(refreshTasks, 5000);
 }
 
@@ -452,6 +605,21 @@ $("goal").addEventListener("keydown", (event) => {
     $("composer").requestSubmit();
   }
 });
+
+/* Grow with the text instead of scrolling inside two rows. A goal worth
+   typing is usually longer than one line. */
+$("goal").addEventListener("input", () => {
+  const box = $("goal");
+  box.style.height = "auto";
+  box.style.height = `${Math.min(box.scrollHeight, 200)}px`;
+});
+
+for (const button of document.querySelectorAll(".example")) {
+  button.onclick = () => {
+    $("goal").value = button.textContent;
+    $("goal").focus();
+  };
+}
 
 $("btn-approve").onclick = () => decide("approve");
 $("btn-deny").onclick = () => decide("deny");

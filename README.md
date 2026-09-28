@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-723%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-730%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -739,7 +739,7 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 723 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 730 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -826,6 +826,29 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 
 7. **跑一次真的，比再读一遍代码有用。** 前两批是静态审计抓的，这两批只有真跑才现形——一条是跨进程的状态丢失（静态看每处都对），一条是运行时对「模型什么都没说」的分类错误。**审计脚本的盲区是「引用存在但语义错」，只有运行能覆盖。**
 8. **持久化的记录必须被读回来。** workspace 记在 session 里、任务自己却没有——「记录存在」和「记录被使用」是两件事。凡是有持久记录的地方，都要问一句：**谁读它？读到的是不是同一份？**
+
+### 第七批：控制台根本没渲染出来
+
+用户说「界面一点都不美观，根本没渲染出来」。**前半句是审美，后半句是真 bug**，而且是我自己「验过」的东西。
+
+| 缺陷 | 为什么我之前的验证没发现 |
+|---|---|
+| **控制台零样式零脚本** | 页面挂在 `/console`，但 `GET /` 直接吐 `index.html`，而 HTML 里写的是**相对路径** `style.css` / `app.js`——在 `/` 下解析成 `/style.css`，**404**。所以浏览器拿到的是一个没有任何样式和脚本的裸 HTML 页面。**而我验的是 `GET /` 返回 200**——那什么也没说明 |
+| **测试锁死了错误的路径** | 那条测试断言 `/console/app.js` 返回 200。它**通过了**，因为静态挂载确实提供这个路径。而页面是从 `/` 提供的、浏览器请求的是 `/app.js`。**一条写死了自己期望路径的测试，抓不住关于路径的分歧** |
+| **打开一个已暂停的任务看不到审批框** | 审批面板只在**实时流**报告 interrupt 时出现。点开一个之前留下的、停在审批的任务，只看到 plan，没有提示也没有按钮——**从界面无法批准它**。和「Cancel 按钮点了没反应」是同一类：只处理了「正在跑」的路径，没处理「重新打开」的路径 |
+
+**修法**：控制台挂在**根路径**（最后注册，API 路由先匹配）；测试改成**解析页面引用的资源、按浏览器的方式解析路径、逐个取一遍**；`syncApproval` 在打开任务时读 `pending_confirmation` 并显示面板。
+
+**顺带修的两个自己的错**：
+- `await attach()` 会**一直阻塞在 SSE 流上**，所以它后面的代码永远不会执行——我把 `syncApproval` 放在它后面，等于没写。**长活连接不能被 await 在关键路径上。**
+- 空状态写「No task running」而旁边正显示审批提示，自相矛盾。
+
+**带走的经验（续）：**
+
+19. **`GET /` 返回 200 证明不了页面能用。** 要证明的是「页面引用的每个资源都能加载」，而那只在浏览器里、或者按浏览器的解析规则检查时才成立。
+20. **写死了期望值的测试，抓不住关于那个值的分歧。** 断言 `/console/app.js` 存在，就永远发现不了页面在请求 `/app.js`。**要断言「页面要什么」和「服务给什么」一致，而不是断言某一方等于一个常数。**
+21. **长活连接（SSE / 流）不能被 `await` 在关键路径上。** 它不 resolve，后面的代码就是死代码——而且没有任何报错。
+22. **界面上的每个状态都要能被看见。** 脚本 toggle 了一个 class 而样式表里没有对应规则 = 用户看不到这个状态 = 等于没有这个状态。（已加静态检查守住这条。）
 
 ### 第六批：真的打开控制台用一次
 

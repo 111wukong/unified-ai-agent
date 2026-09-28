@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -524,11 +524,19 @@ def create_app(
 
     # -- console ----------------------------------------------------------
     if CONSOLE_DIR.is_dir():
-        app.mount("/console", StaticFiles(directory=str(CONSOLE_DIR), html=True), name="console")
-
-        @app.get("/", response_class=HTMLResponse)
-        async def index() -> HTMLResponse:
-            return HTMLResponse((CONSOLE_DIR / "index.html").read_text(encoding="utf-8"))
+        # Mounted at the **root**, not under a prefix.
+        #
+        # The page uses relative URLs (`style.css`, `app.js`), which resolve
+        # against the directory the document was served from. Serving the HTML
+        # from `/` while the assets lived under `/console/` meant the browser
+        # asked for `/style.css` and got a 404: the page arrived with no
+        # stylesheet and no script, so it rendered as unstyled HTML and every
+        # control was dead. The status code for `/` was 200 the whole time,
+        # which is why checking the entry point proved nothing.
+        #
+        # Registered last so every API route above matches first; `html=True`
+        # serves index.html for `/`.
+        app.mount("/", StaticFiles(directory=str(CONSOLE_DIR), html=True), name="console")
 
     return app
 

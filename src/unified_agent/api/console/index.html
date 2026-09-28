@@ -3,75 +3,113 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>unified-ai-agent console</title>
+<title>unified-ai-agent</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div id="app">
+
   <aside id="sidebar">
-    <header>
-      <h1>uaa</h1>
-      <span id="version" class="dim"></span>
+    <header class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="7" rx="1.5"/>
+          <rect x="14" y="3" width="7" height="7" rx="1.5"/>
+          <rect x="3" y="14" width="7" height="7" rx="1.5"/>
+          <path d="M17.5 14v7M14 17.5h7"/>
+        </svg>
+      </span>
+      <div class="brand-text">
+        <span class="brand-name">unified-ai-agent</span>
+        <span class="brand-version" id="version"></span>
+      </div>
     </header>
 
     <section class="panel">
-      <h2>Run</h2>
+      <h2 class="panel-title">Run</h2>
       <label class="field">
-        <span>model</span>
-        <input id="model" value="mock" spellcheck="false">
+        <span class="field-label">Model</span>
+        <input id="model" value="mock" spellcheck="false" autocomplete="off">
       </label>
-      <label class="field">
-        <span>pre-approve</span>
-        <select id="approve" multiple size="4">
-          <option value="read_only">read_only</option>
-          <option value="write_local">write_local</option>
-          <option value="execute_local">execute_local</option>
-          <option value="network">network</option>
-          <option value="external_side_effect">external_side_effect</option>
-        </select>
-      </label>
-      <p class="hint">system_admin can never be granted from the browser.</p>
+      <div class="field">
+        <span class="field-label">Pre-approve effects</span>
+        <div id="approve" class="toggles" role="group" aria-label="Pre-approve effects"></div>
+        <p class="hint">Approved effects run without asking. <code>system_admin</code> can never be granted here.</p>
+      </div>
     </section>
 
     <section class="panel">
-      <h2>Sandbox</h2>
-      <div id="sandbox" class="kv dim">loading…</div>
+      <h2 class="panel-title">Sandbox</h2>
+      <div id="sandbox" class="sandbox">
+        <span class="skeleton"></span>
+      </div>
     </section>
 
-    <section class="panel grow">
-      <h2>Tasks</h2>
+    <section class="panel panel-grow">
+      <h2 class="panel-title">
+        Tasks
+        <span class="panel-count" id="task-count"></span>
+      </h2>
       <div id="tasks" class="task-list"></div>
     </section>
 
-    <footer>
+    <footer class="sidebar-footer">
       <a href="/docs" target="_blank" rel="noreferrer">API docs</a>
-      <span class="dim">·</span>
       <a href="/api/v1/tools" target="_blank" rel="noreferrer">tools</a>
+      <a href="/api/v1/skills" target="_blank" rel="noreferrer">skills</a>
     </footer>
   </aside>
 
   <main id="main">
-    <div id="transcript"></div>
+    <div id="transcript">
+      <div id="empty" class="empty">
+        <div class="empty-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 17V7a2 2 0 0 1 2-2h9l5 5v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/>
+            <path d="M14 5v5h5"/>
+            <path d="M8.5 13.5 11 16l4.5-5"/>
+          </svg>
+        </div>
+        <p class="empty-title">No task running</p>
+        <p class="empty-body">
+          Describe what you want done. The agent plans first, then asks before
+          anything that writes, runs or reaches the network.
+        </p>
+        <div class="empty-examples">
+          <button type="button" class="example">运行测试，找出失败原因并修复</button>
+          <button type="button" class="example">总结这个项目的结构</button>
+        </div>
+      </div>
+    </div>
 
-    <div id="approval" class="approval hidden">
+    <div id="approval" class="approval hidden" role="alertdialog" aria-labelledby="approval-title">
       <div class="approval-head">
-        <strong>Approval required</strong>
-        <span id="approval-effect" class="chip"></span>
+        <span class="approval-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <path d="M12 9v4M12 16.5v.01"/>
+            <path d="M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z"/>
+          </svg>
+        </span>
+        <strong id="approval-title">Approval required</strong>
+        <span id="approval-effect" class="chip chip-warn"></span>
       </div>
       <pre id="approval-preview"></pre>
-      <div id="approval-detail" class="dim"></div>
+      <div id="approval-detail" class="approval-detail"></div>
       <div class="approval-actions">
-        <button id="btn-approve" class="primary">Approve</button>
-        <button id="btn-deny" class="danger">Refuse</button>
+        <button id="btn-approve" class="btn btn-primary">Approve</button>
+        <button id="btn-deny" class="btn btn-danger">Refuse</button>
       </div>
     </div>
 
     <form id="composer">
-      <textarea id="goal" rows="2" placeholder="Describe a task…  (Enter to send, Shift+Enter for a newline)"></textarea>
-      <div class="composer-actions">
-        <span id="status" class="dim">idle</span>
-        <button id="btn-send" type="submit" class="primary">Send</button>
-        <button id="btn-cancel" type="button" class="ghost" disabled>Cancel</button>
+      <div class="composer-box">
+        <textarea id="goal" rows="1" placeholder="Describe a task…" aria-label="Task goal"></textarea>
+        <div class="composer-actions">
+          <span id="status" class="status" data-state="idle">idle</span>
+          <span class="composer-hint">Enter to send · Shift+Enter for a newline</span>
+          <button id="btn-cancel" type="button" class="btn btn-ghost" disabled>Cancel</button>
+          <button id="btn-send" type="submit" class="btn btn-primary">Send</button>
+        </div>
       </div>
     </form>
   </main>

@@ -657,6 +657,27 @@ class TestCancelEndpoint:
         assert response.status_code == 404
 
 
+def _referenced_assets(html: str) -> list[str]:
+    """Stylesheet and script targets, resolved against `/`.
+
+    Only `<link>` and `<script>`: those are what the page cannot render
+    without. A footer link to a guarded API route is a navigation, not an
+    asset, and asserting it would make this test fail for the wrong reason.
+
+    Relative on purpose -- an absolute URL points somewhere else by
+    definition, and the question is only whether the page can load what it
+    asks its own origin for.
+    """
+    import re
+
+    found = re.findall(r'<(?:link|script)\b[^>]*?\b(?:href|src)="([^"]+)"', html)
+    return [
+        f"/{target.lstrip('/')}"
+        for target in found
+        if not target.startswith(("http://", "https://", "//", "#", "data:"))
+    ]
+
+
 class TestGuard:
     """Host allowlist and session token.
 
@@ -711,14 +732,32 @@ class TestGuard:
         with client:
             assert client.get("/api/v1/health").status_code == 200
 
-    def test_the_console_and_its_assets_are_not_guarded(self, guarded) -> None:
-        """The console must load before it can present a token."""
+    def test_the_console_and_its_assets_are_not_guarded(self, guarded) -> None:  # noqa: ANN001
+        """The console must load before it can present a token.
+
+        Checks the assets the page *actually asks for*, resolved the way a
+        browser resolves them. The previous version of this test asserted a
+        hard-coded `/console/app.js` -- which passed, because the static mount
+        served that path. The page itself was served from `/`, so the browser
+        requested `/app.js` and got a 404: no stylesheet, no script, and every
+        other check still green. A test that names the path it expects cannot
+        catch a disagreement about the path.
+        """
         client = guarded(token="s3cret", hosts=["testserver"])
         with client:
-            assert client.get("/", headers={"Host": "testserver"}).status_code == 200
-            assert (
-                client.get("/console/app.js", headers={"Host": "testserver"}).status_code == 200
-            )
+            page = client.get("/", headers={"Host": "testserver"})
+            assert page.status_code == 200
+
+            assets = _referenced_assets(page.text)
+            assert assets, "the console page references no assets; did it change shape?"
+            for asset in assets:
+                response = client.get(asset, headers={"Host": "testserver"})
+                assert response.status_code == 200, (
+                    f"the page references {asset} but the server does not serve it "
+                    f"({response.status_code}) -- the console would load unstyled "
+                    "and without its script"
+                )
+
             # ...while the API behind it is still refused.
             assert (
                 client.get("/api/v1/health", headers={"Host": "testserver"}).status_code == 403
