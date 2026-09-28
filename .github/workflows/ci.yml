@@ -39,13 +39,23 @@ jobs:
           pip install -e ".[dev,api,memory]"
           pip install ruff
 
-      - name: Report which vector accelerator is active
-        run: python -c "
+      - name: Assert the vector accelerator actually loads
+        # An assertion, not a printout. If sqlite-vec silently fails to load
+        # here, every cosine test falls back to the Python path and the
+        # accelerated path is never exercised -- a whole code path untested
+        # while CI reports success. `[memory]` is installed above, so a
+        # fallback here means something is actually wrong.
+        #
+        # Single line on purpose: a multi-line `python -c "..."` in a YAML
+        # block keeps the indentation, and Python reads that as an
+        # IndentationError rather than as formatting.
+        run: >-
+          python -c "import pathlib, tempfile;
           from unified_agent.storage.db import connect, load_extensions;
-          import tempfile, pathlib;
-          c = connect(pathlib.Path(tempfile.mkdtemp())/'x.db');
-          print('accelerator:', load_extensions(c))
-          "
+          c = connect(pathlib.Path(tempfile.mkdtemp()) / 'x.db');
+          a = load_extensions(c);
+          print('accelerator:', a);
+          assert a == 'sqlite-vec', f'expected sqlite-vec, got {a!r}'"
 
       - name: Lint
         run: ruff check src tests examples
