@@ -1066,6 +1066,11 @@ def sandbox(
         None, "--report-to", help="Write the result to this path instead."
     ),
     as_json: bool = typer.Option(False, "--json", help="Print the result as JSON."),
+    bisect: bool = typer.Option(
+        False,
+        "--bisect",
+        help="Test which Seatbelt rule is refused, and whether the fallback works.",
+    ),
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
@@ -1100,6 +1105,10 @@ def sandbox(
         docker_network=settings.sandbox.docker_network,
         docker_mounts=settings.sandbox.docker_mounts,
     )
+
+    if bisect:
+        _run_bisect(settings, report_to=report_to, as_json=as_json)
+        return
 
     live: list[dict[str, Any]] = []
     if selection.sandbox.name == "seatbelt":
@@ -1204,6 +1213,52 @@ def sandbox(
             f"  [cyan]cd {_sh(settings.workspace)} && "
             f"{_sh(sys.executable)} -m unified_agent.cli sandbox --report[/cyan]"
         )
+
+
+def _run_bisect(settings: Any, *, report_to: Any = None, as_json: bool = False) -> None:
+    """Run the profile bisect and print the table.
+
+    Exists because the failure reproduces on the user's machine and not on
+    ours: the experiment has to be shipped rather than run. It tests the
+    candidate *fix* in the same pass, so isolating the cause does not cost a
+    second round trip.
+    """
+    import json
+
+    from unified_agent.sandbox import diagnose
+
+    outcome = diagnose(Path(settings.workspace), Path(settings.home))
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "platform": sys.platform,
+        "workspace": str(settings.workspace),
+        **outcome,
+    }
+
+    target = report_to or (settings.home / "sandbox-bisect.json")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    if as_json:
+        console.print_json(json.dumps(payload, ensure_ascii=False))
+        return
+
+    console.print("[bold]profile bisect[/bold]")
+    for row in payload["results"]:
+        mark = "[green]applied[/green]" if row["ok"] else "[red]refused[/red]"
+        console.print(f"  {mark}  {escape(row['key'])}")
+        console.print(f"    [dim]{escape(row['question'])}[/dim]")
+        if not row["ok"]:
+            console.print(f"    {escape(row['detail'][:150])}")
+        for live in row["live"]:
+            live_mark = "[green]ok[/green]" if live["ok"] else "[red]WRONG[/red]"
+            console.print(
+                f"    live: {escape(live['label'])} -> {live['result']} "
+                f"(expected {live['expected']}) {live_mark}"
+            )
+    console.print()
+    console.print(f"[bold]conclusion[/bold]  {escape(payload['conclusion'])}")
+    console.print(f"[dim]written to {escape(str(target))}[/dim]")
 
 
 def _sh(value: Any) -> str:

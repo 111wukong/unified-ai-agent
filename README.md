@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-455%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-467%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -402,6 +402,24 @@ uaa sandbox --report    # 报告 + 把机器可读结果写到 <home>/sandbox-ve
 
 `builtin_profile` 是**第二个数据点**：`sandbox-exec -n no-network` 用的是 Apple 自带的 profile。它和生成的 profile 以同样方式失败，就说明问题不在生成的 profile 上——这排除了最容易得出的错误结论。
 
+如果探测失败但环境是干净的，用 `--bisect` 定位是哪条规则被拒：
+
+```bash
+uaa sandbox --bisect      # 逐条试，并把候选修法一起测掉
+```
+
+它同时回答两个问题：**哪条规则导致拒绝**，以及**替代写法能不能用、是否仍然挡得住越界写入**。一次跑完，不用来回两轮。
+
+失败模式是可区分的，这个区分很关键：
+
+| rc | 含义 |
+|---|---|
+| `65` + 消息 | profile **语法有问题**（`unbound variable: X` / `syntax error: expecting ')'`） |
+| `71` 或无消息的信号 | profile 语法没问题，是在 **apply 阶段被拒** |
+| `0` | 装上了 |
+
+判定逻辑用**两个对照**：`(allow default)` 通过只能证明「空操作 profile 被接受」，证明不了「能装下真正收窄的 profile」。少一个对照就会把「嵌套沙箱」误判成「deny default 是触发点」。
+
 威胁模型是抄 Codex / Gemini CLI 的，而且理由充分：
 
 > **anti-tampering, not anti-exfiltration** —— 读是全开的，锁的是写。
@@ -449,7 +467,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 455 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 467 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```

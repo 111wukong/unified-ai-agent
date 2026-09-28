@@ -15,7 +15,18 @@ from unified_agent.sandbox.base import (  # noqa: F401
     seatbelt_probe,
 )
 
+from unified_agent.sandbox.diagnose import (  # noqa: F401
+    Candidate,
+    Result,
+    candidates,
+    conclude,
+    diagnose,
+    run_candidate,
+)
+
 __all__ = [
+    "Candidate",
+    "Result",
     "Sandbox",
     "SandboxMode",
     "SandboxSelection",
@@ -27,7 +38,11 @@ __all__ = [
     "SPECIFIC_MARKER_PREFIXES",
     "build_sandbox",
     "builtin_profile_probe",
+    "candidates",
+    "conclude",
     "describe_probe_failure",
+    "diagnose",
     "environment_fingerprint",
+    "run_candidate",
     "seatbelt_probe",
 ]

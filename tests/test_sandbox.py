@@ -634,3 +634,175 @@ class TestVerdictDistinguishesEnvironments:
         from unified_agent.cli import _sandbox_verdict
 
         assert _sandbox_verdict(self._selection(), ProbeResult(False, "x"), [])
+
+
+class TestProfileBisect:
+    """The experiment is shipped, not run, because the failure is on the
+    user's machine. That makes its *conclusion* logic the thing most worth
+    testing -- a wrong conclusion sends them down the wrong path, and unlike
+    the profiles it can be tested anywhere.
+    """
+
+    def _result(self, key: str, ok: bool, live_ok: bool | None = None):  # noqa: ANN202
+        from unified_agent.sandbox import Result
+
+        live = []
+        if live_ok is not None:
+            live = [{"label": "write outside the allowed subpath", "ok": live_ok,
+                     "result": "blocked" if live_ok else "created", "expected": "blocked"}]
+        return Result(key, "q", ok, "applied" if ok else "refused", live)
+
+    def test_the_candidate_list_has_two_controls_and_a_live_check(self) -> None:
+        from unified_agent.sandbox import candidates
+
+        keys = [c.key for c in candidates(Path("/tmp/ws"), Path("/tmp/home"))]
+        assert keys[0] == "control-allow-default", "a no-op control comes first"
+        assert "allow-default-deny-network" in keys, "the second control"
+        assert "allow-default-deny-write-escape" in keys, "the live escape check"
+        assert keys[-1] == "generated-full-profile", "reproduce last"
+
+    def test_the_candidate_fix_is_tested_live(self) -> None:
+        from unified_agent.sandbox import candidates
+
+        by_key = {c.key: c for c in candidates(Path("/tmp/ws"), Path("/tmp/home"))}
+        assert by_key["allow-default-deny-write-reallow"].live is not None
+        assert by_key["allow-default-deny-write-escape"].live is not None
+        assert "(deny file-write*)" in by_key["allow-default-deny-write-reallow"].profile
+
+    def test_no_op_control_failing_means_the_environment_cannot_diagnose(self) -> None:
+        from unified_agent.sandbox import conclude
+
+        text = conclude([self._result("control-allow-default", False)])
+        assert "cannot apply any profile" in text
+        assert "Terminal.app" in text
+
+    def test_a_refused_narrowing_profile_is_not_read_as_deny_default(self) -> None:
+        """The bug this guards: `(allow default)` passing proves only that a
+        no-op is accepted. Reading that as the control misdiagnoses a nested
+        environment as "deny-default is the trigger"."""
+        from unified_agent.sandbox import conclude
+
+        text = conclude(
+            [
+                self._result("control-allow-default", True),
+                self._result("allow-default-deny-network", False),
+                self._result("deny-default-alone", False),
+            ]
+        )
+        assert "cannot install any restrictive profile" in text
+        assert "deny default" not in text.lower().split("cannot")[0]
+
+    def test_deny_default_alone_is_identified_as_the_trigger(self) -> None:
+        from unified_agent.sandbox import conclude
+
+        text = conclude(
+            [
+                self._result("control-allow-default", True),
+                self._result("allow-default-deny-network", True),
+                self._result("deny-default-alone", False),
+                self._result("generated-full-profile", False),
+            ]
+        )
+        assert "`(deny default)` is refused" in text
+        assert "explicit denies" in text
+
+    def test_a_working_deny_default_points_at_the_generated_profile(self) -> None:
+        from unified_agent.sandbox import conclude
+
+        text = conclude(
+            [
+                self._result("control-allow-default", True),
+                self._result("allow-default-deny-network", True),
+                self._result("deny-default-alone", True),
+                self._result("generated-full-profile", False),
+            ]
+        )
+        assert "specific problem rather than a structural one" in text
+
+    def test_an_escape_failure_blocks_adopting_the_fallback(self) -> None:
+        """Applying is not enough; it has to still block the write."""
+        from unified_agent.sandbox import conclude
+
+        text = conclude(
+            [
+                self._result("control-allow-default", True),
+                self._result("allow-default-deny-network", True),
+                self._result("deny-default-alone", True),
+                self._result("generated-full-profile", True),
+                self._result("allow-default-deny-write-escape", True, live_ok=False),
+            ]
+        )
+        assert "must not be adopted" in text
+
+    def test_everything_applying_is_reported_as_environment_specific(self) -> None:
+        from unified_agent.sandbox import conclude
+
+        text = conclude(
+            [
+                self._result("control-allow-default", True),
+                self._result("allow-default-deny-network", True),
+                self._result("deny-default-alone", True),
+                self._result("generated-full-profile", True),
+                self._result("allow-default-deny-write-escape", True, live_ok=True),
+            ]
+        )
+        assert "environment-specific" in text
+
+
+class TestBisectFailureModes:
+    """A malformed profile and a refused profile must not read the same.
+
+    Capability-based rather than platform-based: where `sandbox-exec` is
+    absent the check is "the failure is still reported", and where it is
+    present the check is the stronger one. A platform branch would make these
+    pass vacuously on the runner.
+    """
+
+    def _seatbelt_available(self) -> bool:
+        from unified_agent.sandbox.diagnose import SEATBELT_BIN
+
+        return Path(SEATBELT_BIN).exists()
+
+    def test_a_malformed_profile_is_labelled_as_such(self) -> None:
+        from unified_agent.sandbox import Candidate, run_candidate
+
+        result = run_candidate(
+            Candidate(
+                key="broken",
+                question="?",
+                profile="(version 1)\n(deny default)\n(allow nonsense-op)\n",
+            )
+        )
+        assert not result.ok
+        assert result.detail
+        if self._seatbelt_available():
+            # rc=65 with a parse message, never a bare refusal.
+            assert "MALFORMED" in result.detail or "unbound variable" in result.detail
+
+    def test_an_unclosed_paren_is_reported_as_syntax(self) -> None:
+        from unified_agent.sandbox import Candidate, run_candidate
+
+        result = run_candidate(
+            Candidate(key="unclosed", question="?", profile="(version 1)\n(deny default\n")
+        )
+        assert not result.ok
+        if self._seatbelt_available():
+            assert "syntax" in result.detail.lower() or "MALFORMED" in result.detail
+
+    def test_a_valid_profile_is_not_labelled_malformed(self) -> None:
+        """The distinction has to hold in both directions: a profile refused
+        for permission reasons must not be reported as malformed."""
+        from unified_agent.sandbox import Candidate, run_candidate
+
+        result = run_candidate(
+            Candidate(key="valid", question="?", profile="(version 1)\n(deny default)\n")
+        )
+        assert "MALFORMED" not in result.detail
+
+    def test_every_candidate_produces_a_result(self, tmp_path: Path) -> None:
+        from unified_agent.sandbox import candidates, run_candidate
+
+        for candidate in candidates(tmp_path / "ws", tmp_path / "home"):
+            result = run_candidate(candidate)
+            assert result.key == candidate.key
+            assert result.detail, "a failure must always say something"
