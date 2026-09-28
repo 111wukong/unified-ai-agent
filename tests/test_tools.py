@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
 import pytest
 
 from unified_agent.agent.executor import truncate
@@ -334,5 +338,80 @@ class TestVenvDetection:
         env = _with_venv_on_path({"PATH": "/usr/bin"}, workspace)
         assert env["PATH"].startswith(str(bin_dir))
         assert env["VIRTUAL_ENV"] == str(workspace / ".venv")
+
+
+class TestProjectIsImportableDuringTests:
+    """A bare `pytest` puts the *test file's* directory on `sys.path`, not the
+    directory it was started in.
+
+    For the ordinary layout -- `tests/` importing a package at the project
+    root -- collection therefore dies with `ImportError` before a single test
+    runs, and the message blames the test file rather than the invocation.
+    Found by running a real task for real: the agent burned four calls on
+    `run_tests` before giving up and using `python -m pytest` instead.
+    """
+
+    def test_the_workspace_root_and_src_are_added(self, workspace) -> None:  # noqa: ANN001
+        from unified_agent.tools.shell import _with_project_importable
+
+        (workspace / "src").mkdir()
+        env = _with_project_importable({}, workspace)
+        parts = env["PYTHONPATH"].split(os.pathsep)
+        assert str(workspace) in parts
+        assert str(workspace / "src") in parts
+
+    def test_an_existing_pythonpath_is_kept(self, workspace) -> None:  # noqa: ANN001
+        from unified_agent.tools.shell import _with_project_importable
+
+        env = _with_project_importable({"PYTHONPATH": "/elsewhere"}, workspace)
+        assert env["PYTHONPATH"].endswith("/elsewhere")
+        assert env["PYTHONPATH"].split(os.pathsep)[0] == str(workspace)
+
+    def test_a_missing_src_directory_is_not_invented(self, workspace) -> None:  # noqa: ANN001
+        """Adding a path that does not exist is harmless but it is noise in
+        the environment a subprocess sees."""
+        from unified_agent.tools.shell import _with_project_importable
+
+        parts = _with_project_importable({}, workspace)["PYTHONPATH"].split(os.pathsep)
+        assert str(workspace) in parts
+        assert str(workspace / "src") not in parts
+
+    async def test_run_tests_collects_a_tests_directory_layout(
+        self, workspace, tmp_path  # noqa: ANN001
+    ) -> None:
+        """The test that would have caught the bug: run it for real.
+
+        A package at the root, tests in `tests/`, and a test that imports the
+        package. Without the import path this fails at collection.
+        """
+        from unified_agent.tools.base import ToolContext
+        from unified_agent.tools.shell import RunTestsTool
+
+        (workspace / "shop").mkdir()
+        (workspace / "shop" / "__init__.py").write_text("VALUE = 41\n", encoding="utf-8")
+        (workspace / "tests").mkdir()
+        (workspace / "tests" / "test_shop.py").write_text(
+            "from shop import VALUE\n\n\ndef test_value():\n    assert VALUE == 41\n",
+            encoding="utf-8",
+        )
+        (workspace / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        # A real pytest, so the subprocess actually runs. A shell shim would
+        # make the test pass without exercising the import path at all.
+        bin_dir = workspace / ".venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "pytest").symlink_to(Path(sys.executable).parent / "pytest")
+
+        ctx = ToolContext(
+            task_id="t",
+            session_id="s",
+            step_id="step_1",
+            workspace=workspace,
+            home=tmp_path / "home",
+            artifact_dir=tmp_path / "home",
+        )
+        result = await RunTestsTool().run({}, ctx)
+
+        assert result.success, f"collection failed: {result.error or result.output}"
+        assert "1 passed" in result.output
 
 

@@ -48,6 +48,14 @@ PLAN_SCHEMA: dict[str, Any] = {
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
+#: Shortest step description accepted, in characters.
+#:
+#: Low on purpose -- it exists to catch an empty or placeholder description,
+#: not to judge quality. The number matters less than the fact that the error
+#: message states it: a constraint the model has to guess at is one it can
+#: guess wrong twice, and the repair loop has a fixed number of attempts.
+_MIN_STEP_DESCRIPTION = 4
+
 
 class Planner:
     def __init__(self, *, model: ChatModel, settings: Settings, store: Any = None) -> None:
@@ -138,21 +146,44 @@ class Planner:
         )
 
     def _parse(self, raw: str, tool_names: list[str]) -> list[PlanStep]:
+        # An empty response is not a malformed plan, and saying it is sends the
+        # repair loop after the wrong problem. For a reasoning model this is
+        # the ordinary shape of "the output budget went on thinking": the same
+        # failure the main loop reports explicitly, which the planner did not.
+        if not (raw or "").strip():
+            raise ValueError(
+                "the model returned no content at all (an empty response, usually "
+                "because its output budget was spent on reasoning). Return the JSON "
+                "plan, or raise the model's max_output_tokens."
+            )
         payload = _extract_json(raw)
         if not isinstance(payload, dict):
-            raise ValueError("response was not a JSON object")
+            raise ValueError(
+                f"response was not a JSON object (got {type(payload).__name__}). "
+                'Return an object with a "steps" key.'
+            )
         raw_steps = payload.get("steps")
         if not isinstance(raw_steps, list) or not raw_steps:
-            raise ValueError("`steps` must be a non-empty array")
+            raise ValueError(
+                '`steps` must be a non-empty array. Expected: '
+                '{"steps": [{"description": "...", "expected_tools": ["..."]}, ...]}'
+            )
 
         known = set(tool_names)
         steps: list[PlanStep] = []
         for i, item in enumerate(raw_steps[: self.settings.agent.max_plan_steps]):
             if not isinstance(item, dict):
-                raise ValueError(f"steps[{i}] must be an object")
+                raise ValueError(f"steps[{i}] must be an object, got {type(item).__name__}")
             description = str(item.get("description") or "").strip()
-            if len(description) < 4:
-                raise ValueError(f"steps[{i}].description is missing or too short")
+            # Name the threshold. "too short" with no number is a constraint
+            # the model has to guess at, and a guess that fails again burns
+            # another attempt and can fail the whole task.
+            if len(description) < _MIN_STEP_DESCRIPTION:
+                raise ValueError(
+                    f"steps[{i}].description is {len(description)} character(s); it "
+                    f"must be at least {_MIN_STEP_DESCRIPTION}. Write what the step "
+                    'does, e.g. "run the test suite and read the failures".'
+                )
             expected = [str(t) for t in (item.get("expected_tools") or [])]
             unknown = [t for t in expected if t not in known]
             if unknown:

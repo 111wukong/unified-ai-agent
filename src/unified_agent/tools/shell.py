@@ -13,6 +13,7 @@ import asyncio
 import os
 import shlex
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,38 @@ def find_venv_bin(workspace: Path) -> Path | None:
         if candidate.is_dir():
             return candidate
     return None
+
+
+def _with_project_importable(env: dict[str, str], cwd: Path) -> dict[str, str]:
+    """Put the project's own packages on the import path for a test run.
+
+    A bare `pytest` puts the *test file's* directory on `sys.path`, not the
+    directory it was started in. For the ordinary layout -- `tests/` importing
+    a package at the project root -- that means collection dies with
+    `ImportError` before a single test runs, and the error reads like the test
+    file is broken rather than like the runner was invoked in a way that
+    cannot work.
+
+    `python -m pytest` would fix it, by putting the cwd on the path. It is not
+    used here because `python` is in the always-confirm tier of the command
+    guard: a first-class tool that asks for permission on every single call is
+    a tool the user pre-approves once and stops reading. Setting the import
+    path instead keeps the command's head as `pytest`, which the allowlist can
+    reason about, and fixes the actual problem.
+
+    `src/` is included because that is the other common layout and adding a
+    directory that does not exist costs nothing.
+    """
+    candidates = [cwd, cwd / "src"]
+    existing = [p for p in candidates if p.is_dir()]
+    if not existing:
+        return env
+    parts = [str(p) for p in existing]
+    if current := env.get("PYTHONPATH"):
+        parts.append(current)
+    env = dict(env)
+    env["PYTHONPATH"] = os.pathsep.join(parts)
+    return env
 
 
 def _with_venv_on_path(env: dict[str, str], workspace: Path) -> dict[str, str]:
@@ -187,8 +220,11 @@ class RunTestsTool(Tool):
     spec = ToolSpec(
         name="run_tests",
         description=(
-            "Run the project's test command and return a compact summary. "
-            "Detects pytest, npm test or go test from the workspace."
+            "Run the project's test suite. Prefer this over run_command for tests: "
+            "it picks the project's own interpreter, puts the project on the import "
+            "path so a `tests/` directory can import the package, and returns a "
+            "compact summary. Detects pytest, npm test or go test from the workspace. "
+            "Do not invoke `python -m pytest` through run_command for this."
         ),
         parameters={
             "type": "object",
@@ -239,20 +275,28 @@ class RunTestsTool(Tool):
         argv = self.detect(cwd)
         if target := args.get("target"):
             argv.append(target)
+        # Only the Python runners care, and only `run_tests` knows the project
+        # layout well enough to say which directories those are.
+        runner_ctx = ctx
+        if argv[0].endswith("pytest") or argv[0] == "pytest":
+            runner_ctx = replace(ctx, env=_with_project_importable(ctx.env, cwd))
         return await self._runner.run(
             {
                 "command": " ".join(shlex.quote(a) for a in argv),
                 "cwd": str(cwd),
                 "timeout_s": args.get("timeout_s") or 300,
             },
-            ctx,
+            runner_ctx,
         )
 
 
 class RunLinterTool(Tool):
     spec = ToolSpec(
         name="run_linter",
-        description="Run the detected linter (ruff, eslint or go vet) over the workspace.",
+        description=(
+            "Run the detected linter (ruff, eslint or go vet) over the workspace. "
+            "Use this rather than invoking the linter through run_command."
+        ),
         parameters={
             "type": "object",
             "properties": {

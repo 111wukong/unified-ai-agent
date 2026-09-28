@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-702%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-714%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -739,7 +739,7 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 702 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 714 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -826,6 +826,23 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 
 7. **跑一次真的，比再读一遍代码有用。** 前两批是静态审计抓的，这两批只有真跑才现形——一条是跨进程的状态丢失（静态看每处都对），一条是运行时对「模型什么都没说」的分类错误。**审计脚本的盲区是「引用存在但语义错」，只有运行能覆盖。**
 8. **持久化的记录必须被读回来。** workspace 记在 session 里、任务自己却没有——「记录存在」和「记录被使用」是两件事。凡是有持久记录的地方，都要问一句：**谁读它？读到的是不是同一份？**
+
+### 第五批：跑一次长任务才暴露的两个缺陷
+
+前四批分别是静态审计、真跑一次、对标业界抓到的。这一批是**跑一个长任务**（18–32 步、跨 3 个文件修 5 个 bug）才现形的——它们不是「声明了没接线」，也不是「形状不对」，而是**在正常路径上一直是坏的，只是短任务碰不到**。
+
+| 缺陷 | 为什么短任务碰不到 |
+|---|---|
+| **`run_tests` 对 `tests/` 布局根本跑不起来** | 裸 `pytest` 只把**测试文件所在目录**放进 `sys.path`，不是工作区根。`tests/` 里的测试要 `import orders.calc`（包在根目录）时，**收集阶段就 ImportError**，一个测试都没跑。而 `test_calc.py` 放在根目录的那种布局恰好能过——我之前的演示项目就是那种，所以从没暴露。Agent 因此白烧 4 次调用，只能改用 `python -m pytest`（又被 sticky 档拦下） |
+| **规划器的报错不告诉模型约束是什么** | 阈值是 4 个字符，报错只说 "missing or too short"。修复环次数固定，模型只能猜；猜错两次，**整个任务在开始前就死了**（`planning failed after 3 attempt(s)`）。同一个缺陷类我在主循环修过一次（空响应要点名该调 `max_output_tokens`），**规划器这里漏了** |
+
+两条都指向同一件事：**报错要能被行动。** 一条说「收集失败」但不说「为什么收集失败」的报错，让 agent 去改测试文件而不是改调用方式；一条说「太短」但不说「至少几个字符」的报错，让模型在固定次数的修复环里瞎猜。
+
+**带走的经验（续）：**
+
+13. **长任务不是「短任务跑得久」，它会走到短任务永远走不到的代码路径。** `run_tests` 在两种项目布局下表现不同，只有真跑一个 `tests/` 布局的项目才发现。
+14. **同一个缺陷类会在不同模块里重复。** 「空响应被当成正常输出」我在主循环修过，规划器里一模一样地存在。**修完一个缺陷，去 grep 一遍同一个模式还有没有别处。**
+15. **报错是接口，不是日志。** 凡是模型要照着修的报错，都要说清「收到的是什么」和「要求的是什么」。
 
 ### 第四批：对标业界时发现的四个机制缺口
 
