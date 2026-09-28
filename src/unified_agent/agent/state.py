@@ -163,6 +163,13 @@ class AgentState(BaseModel):
     error: str | None = None
     started_at: float = 0.0
     deadline: float = 0.0
+    #: The directory this task operates in, recorded at creation.
+    #:
+    #: Part of the task's identity, not of the process that happens to be
+    #: running it: the tool context, the sandbox wrap and the path fence all
+    #: derive from it, and resuming in a different directory would move every
+    #: side effect while the model still believed it was somewhere else.
+    workspace: str = ""
     loaded_skills: list[str] = Field(default_factory=list)
     # Effects the user pre-approved for this task (from the CLI or an
     # earlier `approve`). Kept on the state so a resume keeps the grant.
@@ -228,6 +235,7 @@ def replay(events: list, *, task_id: str, session_id: str = "") -> AgentState:
             budgets = payload.get("budgets") or {}
             state.deadline = float(budgets.get("deadline") or 0.0)
             state.started_at = float(budgets.get("started_at") or 0.0)
+            state.workspace = str(budgets.get("workspace") or "")
             state.approved_effects = list(budgets.get("approved_effects") or [])
             state.status = TaskStatus.PENDING
 

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-605%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-614%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -606,7 +606,7 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 605 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 614 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -677,6 +677,22 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 4. **审计脚本自己会有它要找的那类 bug。** 第一版 `public_methods` 排除了整个声明文件，于是「类内部自己调用的方法」全被误报——11 个假阳性盖住 15 个真问题。规则改成「总出现次数减去声明本身」之后信号才干净。**用工具得出的结论，先怀疑工具。**
 5. **「能跑的」和「验证过的」不是一回事。** `read_only=True` 实现是对的，但从未被任何调用点走过——等于一段没人验证过的代码。接线之后才有测试证明它真的挡得住写。
 6. **列表设置必须能从 CLI 设。** 拒绝一切列表的代价是把几个安全设置变成只有手改 TOML 才可达。标量列表用逗号分隔就够了，`mcp_servers` 那种「表的列表」才该留在文件里。
+
+### 第三批：只有真跑才会暴露的两个缺陷
+
+这两条是**用真实模型（DeepSeek-V4.1-Flash）跑一个真任务**时抓到的。测试全绿、审计零发现，它们照样在。
+
+| 缺陷 | 为什么危险 |
+|---|---|
+| **任务的 workspace 没有被持久记录** | session 里记了 `working_dir`，但 task 自己不记。于是 `uaa task approve <id>` 从别的目录执行时，**后续每个工具调用的落点都被静默换掉**：模型以为在 A 目录，而路径围栏是按「恢复进程的目录」建的、放行的是 B。两个答案，错的那个赢了。对一个以「可中断可恢复」为卖点的系统，这是硬伤 |
+| **模型返回空内容时被报告为 `completed`** | 推理模型把输出预算花在推理上、然后一个字都不输出，是**常见形状**；而运行时把它当成一个成功完成的空答案。任务「成功」了、什么都没做，这正是这个项目最想避免的那一类 |
+
+两条都是**「声明/记录存在，但代码不读它」**的变体——和第一、二批同一个根因，只是这次要靠运行才发现，审计脚本看不见它们，因为涉及的字段都被引用了。
+
+**带走的经验：**
+
+7. **跑一次真的，比再读一遍代码有用。** 前两批是静态审计抓的，这两批只有真跑才现形——一条是跨进程的状态丢失（静态看每处都对），一条是运行时对「模型什么都没说」的分类错误。**审计脚本的盲区是「引用存在但语义错」，只有运行能覆盖。**
+8. **持久化的记录必须被读回来。** workspace 记在 session 里、任务自己却没有——「记录存在」和「记录被使用」是两件事。凡是有持久记录的地方，都要问一句：**谁读它？读到的是不是同一份？**
 
 **这一批带走的经验：**
 

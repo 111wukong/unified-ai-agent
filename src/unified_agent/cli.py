@@ -785,7 +785,7 @@ def task_resume(
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
     """Resume an interrupted task. Resolves any in-flight tool calls first."""
-    settings = _settings(home, workspace)
+    settings = _settings_for_task(task_id, home, workspace)
 
     async def _run() -> int:
         agent = await build_agent(settings=settings, on_progress=_progress_printer(False))
@@ -799,6 +799,34 @@ def task_resume(
     raise typer.Exit(asyncio.run(_run()))
 
 
+def _settings_for_task(
+    task_id: str, home: Optional[Path], workspace: Optional[Path]
+) -> Settings:
+    """Settings for a command that resumes an existing task.
+
+    A task acts where it was created, so `uaa task approve <id>` adopts the
+    recorded workspace when `--workspace` was not given -- the user should not
+    have to remember which directory a task was started in.
+
+    When `--workspace` *was* given and disagrees, this leaves it alone and the
+    runtime refuses: silently relocating a task's side effects is worse than an
+    error, and an error can name the flag to pass.
+    """
+    settings = _settings(home, workspace)
+    if workspace is not None or not settings.db_path.exists():
+        return settings
+    from unified_agent.storage.store import Store
+
+    store = Store.readonly(settings.db_path)
+    try:
+        recorded = store.task_workspace(task_id)
+    finally:
+        store.close()
+    if recorded and Path(recorded).resolve() != settings.workspace.resolve():
+        settings.workspace = Path(recorded).resolve()
+    return settings
+
+
 @task_app.command("approve")
 def task_approve(
     task_id: str,
@@ -807,7 +835,7 @@ def task_approve(
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
     """Approve a pending tool call and continue the task."""
-    settings = _settings(home, workspace)
+    settings = _settings_for_task(task_id, home, workspace)
 
     async def _run() -> int:
         agent = await build_agent(settings=settings, on_progress=_progress_printer(False))
@@ -829,7 +857,7 @@ def task_deny(
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
     """Refuse a pending tool call. The agent is told and must not work around it."""
-    settings = _settings(home, workspace)
+    settings = _settings_for_task(task_id, home, workspace)
 
     async def _run() -> int:
         agent = await build_agent(settings=settings, on_progress=_progress_printer(False))

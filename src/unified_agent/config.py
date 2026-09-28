@@ -738,11 +738,14 @@ class ConfigEditor:
         # `models` is a table per alias, which a dotted path cannot express
         # generically (the middle segment is a user-chosen key, not a field).
         if parts[0] == "models":
-            if len(parts) != 3:
-                raise ConfigError(
-                    f"{dotted_key!r}: expected models.<alias>.<field>"
-                )
-            return self._set_model_field(parts[1], parts[2], value)
+            if len(parts) == 3:
+                return self._set_model_field(parts[1], parts[2], value)
+            if len(parts) == 4 and parts[2] == "capabilities":
+                return self._set_model_capability(parts[1], parts[3], value)
+            raise ConfigError(
+                f"{dotted_key!r}: expected models.<alias>.<field> or "
+                "models.<alias>.capabilities.<key>"
+            )
 
         container, field = self._walk(parts, dotted_key)
         return _assign(container, field, value, dotted_key, self.config_file)
@@ -754,6 +757,33 @@ class ConfigEditor:
             raise ConfigError(f"unknown model field {field!r}")
         spec = self.settings.models[alias]
         return _assign(spec, field, value, f"models.{alias}.{field}", self.config_file)
+
+    def _set_model_capability(self, alias: str, key: str, value: Any) -> Any:
+        """`models.<alias>.capabilities.<key>`.
+
+        A string-keyed map of scalars is expressible as a deeper path even
+        though the map itself is not a table -- and this one matters: a model
+        with a 1M context window whose `max_context_tokens` stays at the 128k
+        default makes the context builder compact eight times too eagerly, and
+        nothing in the output says why.
+        """
+        from unified_agent.models.base import ModelCapabilities
+
+        if alias not in self.settings.models:
+            self.settings.models[alias] = ModelSpec()
+        spec = self.settings.models[alias]
+        merged = dict(spec.capabilities) | {key: value}
+        try:
+            # Validate through the capability model so an unknown key or a bad
+            # value is rejected here, not at the first request.
+            validated = ModelCapabilities().merged(merged)
+        except (ValueError, ValidationError) as exc:
+            raise ConfigError(f"models.{alias}.capabilities.{key}: {exc}") from exc
+        spec.capabilities = {
+            name: getattr(validated, name)
+            for name in merged
+        }
+        return value
 
     def _walk(self, parts: list[str], dotted_key: str) -> tuple[Any, str]:
         """Resolve a dotted path to (the object holding the field, field name).

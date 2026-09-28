@@ -9,7 +9,7 @@ from unified_agent.errors import ModelError
 from unified_agent.observability.events import EventType
 from unified_agent.types import EffectClass
 
-from tests.conftest import looping_script
+from tests.conftest import ScriptedModels, looping_script
 
 
 
@@ -331,3 +331,85 @@ class TestScriptedModelSanity:
             "external_side_effect",
             "system_admin",
         }
+
+
+class TestEmptyResponse:
+    """An empty response is a failure, not an empty answer.
+
+    Reporting `completed` when the model said nothing is how a task that did
+    nothing looks like a task that succeeded -- and for a reasoning model it
+    is the ordinary shape of "the output budget ran out before any content
+    was emitted", which is a configuration problem the user can fix once it
+    is named.
+    """
+
+    async def test_an_empty_response_fails_rather_than_completing(
+        self, settings, session_id: str
+    ) -> None:
+        from unified_agent.agent.factory import build_agent
+        from unified_agent.models.mock import MockModel
+        from unified_agent.types import ModelResponse
+
+        class Silent(MockModel):
+            async def _chat(self, messages, **kwargs):  # noqa: ANN001, ANN003
+                if kwargs.get("response_format"):
+                    return self._structured(messages, kwargs["response_format"])
+                return ModelResponse(content="", finish_reason="stop")
+
+        agent = await build_agent(settings=settings, models=ScriptedModels(Silent(settings.models["scripted"])))
+        try:
+            result = await agent.runtime.run("do something", session_id=session_id)
+        finally:
+            agent.close()
+
+        assert result.status == TaskStatus.FAILED.value, (
+            "an empty response must not be reported as success"
+        )
+        assert "no content and no tool calls" in (result.error or "")
+
+    async def test_a_truncated_response_names_the_setting_to_raise(
+        self, settings, session_id: str
+    ) -> None:
+        """`finish_reason=length` is the actionable case: reasoning models
+        spend output tokens on their reasoning, so a budget that looks
+        generous for prose can be gone before any content appears."""
+        from unified_agent.agent.factory import build_agent
+        from unified_agent.models.mock import MockModel
+        from unified_agent.types import ModelResponse
+
+        class Truncated(MockModel):
+            async def _chat(self, messages, **kwargs):  # noqa: ANN001, ANN003
+                if kwargs.get("response_format"):
+                    return self._structured(messages, kwargs["response_format"])
+                return ModelResponse(content="", finish_reason="length")
+
+        agent = await build_agent(settings=settings, models=ScriptedModels(Truncated(settings.models["scripted"])))
+        try:
+            result = await agent.runtime.run("do something", session_id=session_id)
+        finally:
+            agent.close()
+
+        assert result.status == TaskStatus.FAILED.value
+        assert "output budget" in (result.error or "")
+        assert "max_output_tokens" in (result.error or "")
+
+    async def test_whitespace_only_content_is_also_not_an_answer(
+        self, settings, session_id: str
+    ) -> None:
+        from unified_agent.agent.factory import build_agent
+        from unified_agent.models.mock import MockModel
+        from unified_agent.types import ModelResponse
+
+        class Blank(MockModel):
+            async def _chat(self, messages, **kwargs):  # noqa: ANN001, ANN003
+                if kwargs.get("response_format"):
+                    return self._structured(messages, kwargs["response_format"])
+                return ModelResponse(content="   \n  ", finish_reason="stop")
+
+        agent = await build_agent(settings=settings, models=ScriptedModels(Blank(settings.models["scripted"])))
+        try:
+            result = await agent.runtime.run("do something", session_id=session_id)
+        finally:
+            agent.close()
+
+        assert result.status == TaskStatus.FAILED.value

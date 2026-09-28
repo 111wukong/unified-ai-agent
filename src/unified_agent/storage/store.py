@@ -253,6 +253,24 @@ class Store:
         row = self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return dict(row) if row else None
 
+    def task_workspace(self, task_id: str) -> str | None:
+        """The directory a task was created in, via its session.
+
+        Two consumers, both about not acting in the wrong place: `resume`
+        refuses a mismatch, and the CLI defaults `--workspace` from it so
+        `uaa task approve <id>` does the right thing without the user having
+        to remember which directory the task was started in.
+
+        Read from the session rather than a new column: the session already
+        records it, and a second copy is a second thing that can disagree.
+        """
+        row = self.conn.execute(
+            "SELECT s.working_dir AS working_dir FROM tasks t"
+            " JOIN sessions s ON s.id = t.session_id WHERE t.id=?",
+            (task_id,),
+        ).fetchone()
+        return row["working_dir"] if row else None
+
     def list_children(self, parent_task_id: str) -> list[dict[str, Any]]:
         """Tasks a workflow node started, so a run's tree is walkable."""
         rows = self.conn.execute(

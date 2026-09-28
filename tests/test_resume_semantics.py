@@ -18,6 +18,9 @@ import pytest
 
 from unified_agent.agent.state import TaskStatus, replay
 from unified_agent.observability.events import EventType
+from tests.conftest import ScriptedModels
+
+
 from unified_agent.types import idempotency_key
 
 
@@ -304,3 +307,135 @@ class TestStepBudgetSurvivesResume:
         assert state.status.terminal
 
 
+
+
+class TestTaskWorkspace:
+    """A task acts where it was created, not where the resuming process runs.
+
+    Found by running the agent for real: a task created with
+    `--workspace /tmp/demo` was approved from the project directory without
+    that flag, and every subsequent tool call ran in the *project*. The model
+    believed it was in the demo directory; the path fence, built from the
+    resuming process's workspace, allowed the project. Two answers to "where
+    is this task", and the wrong one won.
+    """
+
+    async def test_the_workspace_is_recorded_and_folded_back(
+        self, scripted, session_id: str, settings  # noqa: ANN001
+    ) -> None:
+        agent, _ = await scripted([{"content": "done"}])
+        result = await agent.runtime.run("do a thing", session_id=session_id)
+
+        created = next(
+            e for e in agent.store.events(result.task_id) if e.type is EventType.TASK_CREATED
+        )
+        assert created.payload["budgets"]["workspace"] == str(settings.workspace)
+
+        # Folded from the event, so a resume reconstructs it without a join.
+        state = replay(agent.store.events(result.task_id), task_id=result.task_id)
+        assert state.workspace == str(settings.workspace)
+
+    async def test_resuming_from_a_different_directory_is_refused(
+        self, scripted, session_id: str, settings, tmp_path  # noqa: ANN001
+    ) -> None:
+        """Silently relocating a task's side effects is worse than an error,
+        and an error can name the flag to pass.
+
+        The task has to be *unfinished* for this to matter -- a completed one
+        returns before the check -- so it is paused on an approval, which is
+        exactly the state `uaa task approve` is run from.
+        """
+        from unified_agent.agent.factory import build_agent
+
+        agent, _ = await scripted(
+            [{"tool_calls": [{"name": "run_command", "arguments": {"command": "ls"}}]}]
+        )
+        paused = await agent.runtime.run("run ls", session_id=session_id)
+        assert paused.status == TaskStatus.WAITING_CONFIRMATION.value
+        task_id = paused.task_id
+
+        elsewhere = tmp_path / "somewhere-else"
+        elsewhere.mkdir()
+        other_settings = settings.model_copy(update={"workspace": elsewhere})
+        other = await build_agent(
+            settings=other_settings, models=ScriptedModels(agent.models.get())
+        )
+        try:
+            with pytest.raises(ValueError, match="was created in"):
+                await other.runtime.resume(task_id)
+        finally:
+            other.close()
+
+    async def test_resuming_in_the_recorded_directory_is_fine(
+        self, scripted, session_id: str
+    ) -> None:
+        agent, _ = await scripted([{"content": "done"}])
+        task_id = await _start_task(agent, session_id)
+        result = await agent.runtime.resume(task_id)
+        assert result.status == TaskStatus.COMPLETED.value
+
+    async def test_an_older_task_without_a_recorded_workspace_still_resumes(
+        self, scripted, session_id: str, settings  # noqa: ANN001
+    ) -> None:
+        """Tasks created before the field existed carry no workspace, and the
+        check must not turn them into unresumable history."""
+        from unified_agent.agent.state import replay as _replay
+
+        agent, _ = await scripted([{"content": "done"}])
+        task_id = agent.store.create_task(
+            session_id=session_id, goal="legacy", budgets={"model": "scripted"}
+        )
+        state = _replay(agent.store.events(task_id), task_id=task_id)
+        assert state.workspace == ""
+        assert agent.store.task_workspace(task_id) == str(settings.workspace)
+        # No recorded workspace on the task, so nothing to conflict with.
+        result = await agent.runtime.resume(task_id)
+        assert result.status == TaskStatus.COMPLETED.value
+
+
+class TestCliWorkspaceAdoption:
+    """`uaa task approve <id>` should not need `--workspace` to be correct."""
+
+    def test_the_helper_adopts_the_recorded_workspace(
+        self, settings, tmp_path  # noqa: ANN001
+    ) -> None:
+        from unified_agent.cli import _settings_for_task
+        from unified_agent.storage.store import Store
+
+        store = Store(settings.db_path)
+        try:
+            elsewhere = tmp_path / "recorded"
+            elsewhere.mkdir()
+            session = store.create_session(
+                name="s", working_dir=str(elsewhere), model_alias="mock"
+            )
+            task_id = store.create_task(session_id=session, goal="g")
+        finally:
+            store.close()
+
+        adopted = _settings_for_task(task_id, home=settings.home, workspace=None)
+        assert adopted.workspace == elsewhere.resolve()
+
+    def test_an_explicit_workspace_is_left_alone_so_the_runtime_can_refuse(
+        self, settings, tmp_path  # noqa: ANN001
+    ) -> None:
+        """The helper must not paper over a conflict the user asked for: the
+        runtime's refusal is what names the right flag."""
+        from unified_agent.cli import _settings_for_task
+        from unified_agent.storage.store import Store
+
+        store = Store(settings.db_path)
+        try:
+            recorded = tmp_path / "recorded"
+            recorded.mkdir()
+            session = store.create_session(
+                name="s", working_dir=str(recorded), model_alias="mock"
+            )
+            task_id = store.create_task(session_id=session, goal="g")
+        finally:
+            store.close()
+
+        explicit = tmp_path / "explicit"
+        explicit.mkdir()
+        kept = _settings_for_task(task_id, home=settings.home, workspace=explicit)
+        assert kept.workspace == explicit.resolve()

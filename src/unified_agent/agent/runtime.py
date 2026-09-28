@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import BaseModel, Field
@@ -132,6 +133,10 @@ class AgentRuntime:
             "deadline": time.time() + self.settings.agent.wall_clock_s,
             "approved_effects": effects,
             "model": model_alias or self.settings.default_model,
+            # Recorded so a resume can refuse to operate somewhere else. The
+            # session carries it too, but a task that describes itself does
+            # not depend on a join to answer "where does this act".
+            "workspace": str(self.settings.workspace),
         }
         task_id = self.store.create_task(
             session_id=session_id,
@@ -168,6 +173,22 @@ class AgentRuntime:
         state = replay(events, task_id=task_id, session_id=task["session_id"])
         if state.status.terminal:
             return self._result(state, duration=0.0)
+
+        # A task acts where it was created, not where the resuming process
+        # happens to have been launched. Without this check, `uaa task approve`
+        # run from a different directory silently moved every subsequent side
+        # effect -- and the path fence would have allowed it, because the fence
+        # is built from *this* process's workspace while the model's view of
+        # "the project" came from the recorded one. Two answers to the same
+        # question, and the wrong one wins.
+        recorded = state.workspace
+        if recorded and Path(recorded).resolve() != Path(self.settings.workspace).resolve():
+            raise ValueError(
+                f"task {task_id} was created in {recorded!r} but this process "
+                f"is working in {str(self.settings.workspace)!r}. Resuming it "
+                "here would move every side effect. Re-run with "
+                f"`--workspace {recorded}`."
+            )
 
         model_alias = None
         for event in events:
@@ -350,7 +371,14 @@ class AgentRuntime:
 
             # --- no tool call: the answer ------------------------------
             if not resp.wants_tools:
-                return self._complete(state, resp.content or "(the model returned no content)", started)
+                if not (resp.content or "").strip():
+                    # An empty response is not an answer. Reporting `completed`
+                    # here is how a task that did nothing looks like a task
+                    # that succeeded -- and for a reasoning model it is the
+                    # common shape of "the output budget ran out before the
+                    # model got to its answer".
+                    return self._fail(state, _empty_response_reason(resp), started)
+                return self._complete(state, resp.content, started)
 
             # --- execute ------------------------------------------------
             try:
@@ -580,11 +608,15 @@ class AgentRuntime:
     # -- helpers ----------------------------------------------------------
     def _tool_context(self, state: AgentState) -> ToolContext:
         effects = {EffectClass(e) for e in state.approved_effects}
+        # The task's recorded workspace, not the process's. `resume` refuses a
+        # mismatch, so these agree -- reading the task's value here is what
+        # makes that agreement explicit rather than incidental.
+        workspace = Path(state.workspace) if state.workspace else self.settings.workspace
         return ToolContext(
             task_id=state.task_id,
             session_id=state.session_id,
             step_id=state.step_id(),
-            workspace=self.settings.workspace,
+            workspace=workspace,
             home=self.settings.home,
             artifact_dir=self.settings.artifact_dir,
             approved_effects=frozenset(effects),
@@ -801,6 +833,29 @@ class AgentRuntime:
                 self.on_progress(kind, payload)
             except Exception:  # noqa: BLE001 - UI must never break a task
                 pass
+
+
+def _empty_response_reason(resp: Any) -> str:
+    """Why an empty response is a failure, in terms the user can act on.
+
+    `finish_reason == "length"` is the case worth naming precisely: reasoning
+    models spend output tokens on their reasoning, so a budget that looks
+    generous for prose can be exhausted before any content is emitted. The
+    message says which setting to raise rather than leaving the user to guess
+    why their agent "completed" without doing anything.
+    """
+    if resp.finish_reason == "length":
+        return (
+            "the model used its entire output budget before producing an answer "
+            "(finish_reason=length). Nothing was accomplished. Raise "
+            "`models.<alias>.max_output_tokens`, or reduce the reasoning effort "
+            "if the provider exposes one."
+        )
+    return (
+        "the model returned no content and no tool calls "
+        f"(finish_reason={resp.finish_reason!r}). Nothing was accomplished, so "
+        "this is a failure rather than an empty answer."
+    )
 
 
 __all__ = ["AgentRuntime", "AgentResult"]
