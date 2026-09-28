@@ -66,6 +66,56 @@ class TestProbeHonesty:
         assert "allow default" not in _PROBE_PROFILE
 
 
+class TestProbeDoesNotOverclaim:
+    """The probe must not assert a cause it has not established.
+
+    A signal death with no output was previously reported as "you are inside a
+    sandbox", which is a guess. The reader acts on the explanation, so a wrong
+    one sends them looking in the wrong place.
+    """
+
+    def test_a_signal_death_does_not_claim_a_cause(self, monkeypatch) -> None:  # noqa: ANN001
+        from unified_agent.sandbox import base as sandbox_base
+
+        class Died:
+            returncode = -6  # SIGABRT
+            stdout = b""
+            stderr = b""
+
+        monkeypatch.setattr(sandbox_base.subprocess, "run", lambda *a, **k: Died())
+        monkeypatch.setattr(
+            sandbox_base,
+            "environment_fingerprint",
+            lambda: {"inside_parent_sandbox": False, "sandbox_markers": []},
+        )
+        result = sandbox_base.seatbelt_probe()
+        assert result.ok is False
+        assert "SIGABRT" in result.detail
+        assert "already inside a sandbox" not in result.detail, (
+            "a signal death is not evidence of a nested sandbox"
+        )
+        assert "refusal, not a crash" in result.detail
+
+    def test_a_signal_death_inside_a_known_sandbox_does_say_so(
+        self, monkeypatch
+    ) -> None:  # noqa: ANN001
+        from unified_agent.sandbox import base as sandbox_base
+
+        class Died:
+            returncode = -6
+            stdout = b""
+            stderr = b""
+
+        monkeypatch.setattr(sandbox_base.subprocess, "run", lambda *a, **k: Died())
+        monkeypatch.setattr(
+            sandbox_base,
+            "environment_fingerprint",
+            lambda: {"inside_parent_sandbox": True, "sandbox_markers": ["CODEBUDDY_X"]},
+        )
+        result = sandbox_base.seatbelt_probe()
+        assert "already inside a sandbox" in result.detail
+
+
 class TestSeatbeltProfile:
     @pytest.fixture
     def sandbox(self, tmp_path: Path) -> SeatbeltSandbox:

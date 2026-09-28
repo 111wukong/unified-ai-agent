@@ -348,13 +348,27 @@ def seatbelt_probe() -> ProbeResult:
         else:
             message = f"exit {result.returncode}"
 
-    hint = ""
-    if "Operation not permitted" in message or result.returncode < 0:
+    # Only claim "you are inside a sandbox" when there is evidence for it.
+    # A signal death was previously folded into the same hint, which asserts a
+    # cause the probe had not established -- and the reader acts on that.
+    nested = "Operation not permitted" in message or environment_fingerprint()[
+        "inside_parent_sandbox"
+    ]
+    if nested:
         hint = (
             " -- this process is already inside a sandbox, and macOS will not "
             "let it install a narrower one. Run `uaa sandbox` from a normal "
             "terminal to verify."
         )
+    elif result.returncode < 0:
+        hint = (
+            " -- sandbox-exec died without a message. That is a refusal, not a "
+            "crash: this macOS build will not install a restrictive profile "
+            "for this process. Run `uaa sandbox` from a normal terminal to "
+            "compare."
+        )
+    else:
+        hint = ""
     return ProbeResult(False, message + hint)
 
 
