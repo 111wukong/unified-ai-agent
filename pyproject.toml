@@ -23,8 +23,12 @@ api = ["fastapi>=0.115", "uvicorn>=0.32"]
 # The desktop window is the OS webview around the same server and console, so
 # it needs exactly one dependency. `all` is the "just make it work" extra.
 desktop = ["pywebview>=5.0"]
+# sqlite-vec accelerates cosine search. It is optional on purpose: the pure
+# Python path computes the same metric over the same rows, so a machine
+# without it is slower, not different.
+memory = ["sqlite-vec>=0.1.6"]
 mcp = ["mcp>=1.0"]
-all = ["fastapi>=0.115", "uvicorn>=0.32", "pywebview>=5.0"]
+all = ["fastapi>=0.115", "uvicorn>=0.32", "pywebview>=5.0", "sqlite-vec>=0.1.6"]
 
 [project.scripts]
 uaa = "unified_agent.cli:main"

@@ -28,13 +28,24 @@ jobs:
           cache: pip
 
       - name: Install
-        # `[api]` is required, not optional: without fastapi the API tests
-        # `importorskip` and silently vanish, so CI goes green while a whole
-        # layer is untested. The explicit check below catches that.
+        # `[api]` and `[memory]` are required here, not optional: without
+        # fastapi the API tests `importorskip` and silently vanish, and
+        # without sqlite-vec the accelerated cosine path is never exercised.
+        # CI going green while a whole layer is untested is the failure the
+        # skip guard below exists to catch, but installing the extras is the
+        # fix.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,api]"
+          pip install -e ".[dev,api,memory]"
           pip install ruff
+
+      - name: Report which vector accelerator is active
+        run: python -c "
+          from unified_agent.storage.db import connect, load_extensions;
+          import tempfile, pathlib;
+          c = connect(pathlib.Path(tempfile.mkdtemp())/'x.db');
+          print('accelerator:', load_extensions(c))
+          "
 
       - name: Lint
         run: ruff check src tests examples

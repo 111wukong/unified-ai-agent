@@ -252,6 +252,28 @@ class McpServerConfig(BaseModel):
     startup_timeout_s: float = 30.0
 
 
+class MemoryConfig(BaseModel):
+    """Long-term memory.
+
+    The embedding model is optional on purpose. Without one the store still
+    works: vectors degrade to a lexical hash (fine for dedupe, not for
+    semantics) and the contradiction judge degrades to exact-duplicate
+    detection. A memory feature that silently stops working when a second
+    service is not configured is worse than one that degrades predictably.
+    """
+
+    embedding_model: str = ""
+    embedding_base_url: str | None = None
+    embedding_api_key_env: str = "OPENAI_API_KEY"
+    hashing_dim: int = 512
+    neighbour_limit: int = 5
+    vector_limit: int = 10
+    # Drop vector hits at or below this cosine similarity. 0.0 only removes
+    # "nothing in common"; it is not a relevance threshold.
+    min_similarity: float = 0.0
+    reconcile: bool = True
+
+
 class SandboxConfig(BaseModel):
     """Process isolation. `auto` prefers macOS Seatbelt: it is free per
     command, and a sandbox you leave on protects more than a stronger one
@@ -273,6 +295,7 @@ class Settings(BaseModel):
     permissions: PermissionConfig = Field(default_factory=PermissionConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
     skill_dirs: list[str] = Field(default_factory=lambda: ["skills"])
 
@@ -393,6 +416,15 @@ backend = "auto"
 # `read-only` makes the project tree (including .git) unwritable -- use it
 # for "analyse this repo" tasks.
 mode = "workspace-write"
+
+[memory]
+# Leave empty to use the offline lexical fallback. Set to a real embedding
+# model (e.g. "text-embedding-3-small") for semantic search.
+embedding_model = ""
+# embedding_base_url = "https://api.openai.com/v1"
+embedding_api_key_env = "OPENAI_API_KEY"
+# Run the contradiction judge when a new memory is written.
+reconcile = true
 
 [agent]
 max_steps = 30

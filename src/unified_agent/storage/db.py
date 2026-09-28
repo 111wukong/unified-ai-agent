@@ -12,14 +12,20 @@ Schema decisions worth defending:
 * FTS5 uses the `trigram` tokenizer. `unicode61` treats a whole run of CJK
   as one token, so "认证" would never match "认证模块". Trigram needs >=3
   characters, hence the LIKE fallback in memory/store.py.
+* `memory_vectors` is ours, not sqlite-vec's. sqlite-vec is used only for its
+  `vec_distance_cosine` scalar function, so the accelerated path and the pure
+  Python fallback compute the same metric over the same rows and can be
+  checked against each other. Letting the extension own the schema would make
+  "sqlite-vec present" a different database rather than a faster one.
 """
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _DDL = """
 PRAGMA journal_mode=WAL;
@@ -138,6 +144,32 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
     VALUES (new.rowid, new.content, new.tags);
 END;
 
+-- Memory vectors live in their own table rather than a column on
+-- `memories`: the dimension depends on the embedding model, and a rebuild
+-- with a different model must be able to drop and refill this without
+-- touching the memories themselves.
+CREATE TABLE IF NOT EXISTS memory_vectors (
+    memory_id  TEXT PRIMARY KEY,
+    model      TEXT NOT NULL,
+    dim        INTEGER NOT NULL,
+    vec        BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_memory_vectors_model ON memory_vectors(model, dim);
+
+-- Invalidation history. `superseded_by` answers "what replaced this"; this
+-- answers "what did it replace", which is what makes the timeline readable
+-- ("was X, now Y") instead of a one-way pointer.
+CREATE TABLE IF NOT EXISTS memory_revisions (
+    id          TEXT PRIMARY KEY,
+    memory_id   TEXT NOT NULL,
+    replaced_by TEXT,
+    reason      TEXT NOT NULL DEFAULT '',
+    source      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_memory_revisions_memory ON memory_revisions(memory_id);
+
 CREATE TABLE IF NOT EXISTS skills (
     name          TEXT PRIMARY KEY,
     source        TEXT NOT NULL DEFAULT 'local',
@@ -159,6 +191,33 @@ CREATE TABLE IF NOT EXISTS skill_runs (
 """
 
 
+def load_extensions(conn: sqlite3.Connection) -> str:
+    """Try to load sqlite-vec. Returns the accelerator name in use.
+
+    Best-effort by design: the extension is an optimisation, and a machine
+    without it must still get identical results from the Python path. It is
+    also not always loadable -- Python has to be built with extension support,
+    and `enable_load_extension` is a no-op on some distributions.
+    """
+    try:
+        import sqlite_vec  # type: ignore[import-untyped]
+    except ImportError:
+        return "python"
+    try:
+        conn.enable_load_extension(True)
+    except (AttributeError, sqlite3.OperationalError):
+        return "python"
+    try:
+        sqlite_vec.load(conn)
+        conn.execute("SELECT vec_version()").fetchone()
+    except (sqlite3.Error, OSError):
+        return "python"
+    finally:
+        with contextlib.suppress(AttributeError, sqlite3.OperationalError):
+            conn.enable_load_extension(False)
+    return "sqlite-vec"
+
+
 def connect(db_path: Path | str, *, read_only: bool = False) -> sqlite3.Connection:
     path = Path(db_path)
     if str(path) != ":memory:":
@@ -171,6 +230,7 @@ def connect(db_path: Path | str, *, read_only: bool = False) -> sqlite3.Connecti
         uri=uri is not None,
     )
     conn.row_factory = sqlite3.Row
+    load_extensions(conn)
     if not read_only:
         conn.executescript(_DDL)
         conn.execute(

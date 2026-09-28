@@ -8,7 +8,10 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
+
+if TYPE_CHECKING:  # pragma: no cover
+    from unified_agent.memory.vector import VectorIndex
 
 from unified_agent.observability.events import Event, EventType
 from unified_agent.observability.redact import DEFAULT_REDACTOR, Redactor
@@ -81,6 +84,7 @@ class Store:
         # log file, because the DB is mutable in principle and the JSONL is not.
         self.sink = sink
         self._lock = threading.RLock()
+        self._vector_index: Any = None
 
     def close(self) -> None:
         with self._lock:
@@ -414,15 +418,83 @@ class Store:
         return mid
 
     def search_memories(
-        self, query: str, *, scope: str | None = None, limit: int = 8
+        self,
+        query: str,
+        *,
+        scope: str | None = None,
+        limit: int = 8,
+        mode: str = "fts",
+        query_vector: list[float] | None = None,
+        vector_model: str | None = None,
+        min_similarity: float = 0.0,
     ) -> list[dict[str, Any]]:
-        """FTS5 trigram search with a LIKE fallback for short queries.
+        """Search memories. `mode` is `fts`, `vector`, `hybrid` or `auto`.
+
+        `auto` uses hybrid when a query vector is supplied and fts otherwise,
+        so callers that cannot embed (no provider configured) get the old
+        behaviour without special-casing.
+
+        Hybrid merges the two rankings with reciprocal rank fusion rather than
+        a weighted score sum. FTS5's `bm25` and a cosine similarity are not on
+        the same scale and have no shared meaning, so any linear blend needs a
+        normalisation step that is itself a tuning problem. RRF only looks at
+        *positions*, which is why it works without tuning and why it is the
+        right default here.
+        """
+        q = query.strip()
+        if mode == "auto":
+            mode = "hybrid" if query_vector else "fts"
+        if mode == "fts" and not q:
+            return []
+        if mode == "vector" and not query_vector:
+            mode = "fts"
+
+        if mode == "fts":
+            return self._search_fts(q, scope=scope, limit=limit)
+        if mode == "vector":
+            return self.search_vectors(
+                query_vector or [],
+                model=vector_model or "",
+                limit=limit,
+                scope=scope,
+                min_similarity=min_similarity,
+            )
+
+        ranked: list[list[str]] = []
+        fts_rows = self._search_fts(q, scope=scope, limit=limit * 3) if q else []
+        ranked.append([r["id"] for r in fts_rows])
+        vector_rows = (
+            self.search_vectors(
+                query_vector or [],
+                model=vector_model or "",
+                limit=limit * 3,
+                scope=scope,
+                min_similarity=min_similarity,
+            )
+            if query_vector
+            else []
+        )
+        ranked.append([r["id"] for r in vector_rows])
+        order = _reciprocal_rank_fusion(ranked)[:limit]
+        if not order:
+            return []
+        by_id = {r["id"]: r for r in [*fts_rows, *vector_rows]}
+        out: list[dict[str, Any]] = []
+        for memory_id in order:
+            row = by_id.get(memory_id)
+            if row is None:
+                row = self.get_memory(memory_id)
+            if row:
+                out.append(row)
+        return out
+
+    def _search_fts(self, q: str, *, scope: str | None, limit: int) -> list[dict[str, Any]]:
+        """FTS5 trigram, with a LIKE fallback for short queries.
 
         Trigram tokenization needs >=3 characters. Chinese two-character
         terms ("认证", "部署") are extremely common, so falling back to LIKE
         is not an optimisation -- it is required for correctness.
         """
-        q = query.strip()
         if not q:
             return []
         rows: list[sqlite3.Row] = []
@@ -457,6 +529,203 @@ class Store:
             rows = self.conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
+    def search_memories_any(
+        self, terms: Sequence[str], *, scope: str | None = None, limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """FTS5 OR over terms, ranked by how many of them matched.
+
+        Needed because `search_memories` quotes the whole query as one term.
+        That is right for a user typing a phrase, and wrong for "find things
+        like this paragraph": a candidate sentence is never a substring of a
+        stored one, so a literal search finds nothing and the contradiction
+        check silently has no neighbours to look at.
+        """
+        usable = [t.strip() for t in terms if len(t.strip()) >= 2]
+        if not usable:
+            return []
+        seen: dict[str, dict[str, Any]] = {}
+        for term in usable[:12]:
+            for row in self._search_fts(term, scope=scope, limit=limit * 4):
+                entry = seen.setdefault(row["id"], {**row, "matched": 0})
+                entry["matched"] += 1
+        if not seen:
+            return []
+        ranked = sorted(
+            seen.values(),
+            key=lambda r: (r["matched"], r.get("importance", 0.0)),
+            reverse=True,
+        )
+        return ranked[:limit]
+
+    # -- vectors ----------------------------------------------------------
+    @property
+    def vectors(self) -> "VectorIndex":
+        if self._vector_index is None:
+            from unified_agent.memory.vector import VectorIndex
+
+            self._vector_index = VectorIndex(self.conn)
+        return self._vector_index
+
+    def put_vector(
+        self, memory_id: str, vector: list[float], *, model: str, dim: int | None = None
+    ) -> None:
+        """Store a vector under `model`. Pass `dim` to assert the expected size."""
+        with self._lock:
+            self.vectors.upsert(memory_id, vector, model=model, dim=dim)
+
+    def search_vectors(
+        self,
+        query_vector: list[float],
+        *,
+        model: str,
+        limit: int = 10,
+        scope: str | None = None,
+        min_similarity: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Nearest memories by cosine similarity. Superseded rows are excluded."""
+        if not query_vector:
+            return []
+        hits = self.vectors.search(
+            query_vector, model=model, limit=limit * 2, min_similarity=min_similarity
+        )
+        if not hits:
+            return []
+        by_id = {hit.memory_id: hit.similarity for hit in hits}
+        placeholders = ",".join("?" for _ in by_id)
+        sql = (
+            f"SELECT * FROM memories WHERE id IN ({placeholders})"
+            " AND superseded_by IS NULL"
+        )
+        params: list[Any] = list(by_id)
+        if scope:
+            sql += " AND scope=?"
+            params.append(scope)
+        rows = self.conn.execute(sql, params).fetchall()
+        out = [{**dict(r), "similarity": by_id[r["id"]]} for r in rows]
+        out.sort(key=lambda r: r["similarity"], reverse=True)
+        return out[:limit]
+
+    def get_memory(self, memory_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+        return dict(row) if row else None
+
+    # -- invalidation -----------------------------------------------------
+    def invalidate_memory(
+        self,
+        memory_id: str,
+        *,
+        replaced_by: str,
+        reason: str = "",
+        source: str = "curator",
+    ) -> bool:
+        """Mark a memory as superseded rather than deleting it.
+
+        Zep's temporal model, at the cost of one column and one row: the old
+        fact stops appearing in search results but the store can still answer
+        "what did this used to be", which is the question a plain overwrite
+        destroys.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT id FROM memories WHERE id=? AND superseded_by IS NULL", (memory_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            self.conn.execute(
+                "UPDATE memories SET superseded_by=?, updated_at=? WHERE id=?",
+                (replaced_by, now_iso(), memory_id),
+            )
+            self.conn.execute(
+                "INSERT INTO memory_revisions(id,memory_id,replaced_by,reason,source,created_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (new_id("rev"), memory_id, replaced_by, reason, source, now_iso()),
+            )
+        return True
+
+    def memory_history(self, memory_id: str) -> list[dict[str, Any]]:
+        """The whole chain a memory belongs to, oldest first.
+
+        Walks `superseded_by` forward and `memory_revisions` backward, so the
+        caller sees "was X, then Y, now Z" regardless of which link it started
+        from.
+        """
+        chain: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        # Backwards to the origin.
+        cursor = memory_id
+        while cursor and cursor not in seen:
+            seen.add(cursor)
+            row = self.conn.execute(
+                "SELECT * FROM memory_revisions WHERE replaced_by=? ORDER BY created_at DESC",
+                (cursor,),
+            ).fetchone()
+            if row is None:
+                break
+            cursor = row["memory_id"]
+            chain.append({"id": cursor, "via": "revision"})
+
+        chain.reverse()
+        chain.append({"id": memory_id, "via": "self"})
+
+        # Forwards through the supersessions.
+        cursor = memory_id
+        while True:
+            row = self.conn.execute(
+                "SELECT superseded_by FROM memories WHERE id=?", (cursor,)
+            ).fetchone()
+            if row is None or not row["superseded_by"] or row["superseded_by"] in seen:
+                break
+            cursor = row["superseded_by"]
+            seen.add(cursor)
+            chain.append({"id": cursor, "via": "superseded"})
+
+        out: list[dict[str, Any]] = []
+        for entry in chain:
+            memory = self.get_memory(entry["id"])
+            if memory is None:
+                continue
+            revision = self.conn.execute(
+                "SELECT reason, source, created_at FROM memory_revisions WHERE memory_id=?",
+                (entry["id"],),
+            ).fetchone()
+            out.append(
+                {
+                    **memory,
+                    "relation": entry["via"],
+                    "replaced_reason": revision["reason"] if revision else "",
+                }
+            )
+        return out
+
+    def memory_stats(self) -> dict[str, Any]:
+        total = self.conn.execute("SELECT COUNT(*) AS n FROM memories").fetchone()["n"]
+        active = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM memories WHERE superseded_by IS NULL"
+        ).fetchone()["n"]
+        by_scope = {
+            r["scope"]: r["n"]
+            for r in self.conn.execute(
+                "SELECT scope, COUNT(*) AS n FROM memories WHERE superseded_by IS NULL"
+                " GROUP BY scope"
+            ).fetchall()
+        }
+        by_source = {
+            r["source"]: r["n"]
+            for r in self.conn.execute(
+                "SELECT source, COUNT(*) AS n FROM memories WHERE superseded_by IS NULL"
+                " GROUP BY source"
+            ).fetchall()
+        }
+        return {
+            "total": int(total),
+            "active": int(active),
+            "superseded": int(total - active),
+            "by_scope": by_scope,
+            "by_source": by_source,
+            "vectors": self.vectors.describe(),
+        }
+
     def list_memories(self, *, scope: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         if scope:
             rows = self.conn.execute(
@@ -467,7 +736,7 @@ class Store:
         else:
             rows = self.conn.execute(
                 "SELECT * FROM memories WHERE superseded_by IS NULL"
-                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -512,6 +781,22 @@ class Store:
                 "INSERT INTO skill_runs(id,skill_name,task_id,outcome,created_at) VALUES(?,?,?,?,?)",
                 (new_id("skillrun"), skill_name, task_id, outcome, now_iso()),
             )
+
+
+def _reciprocal_rank_fusion(ranked_lists: list[list[str]], *, k: int = 60) -> list[str]:
+    """Merge rankings by position, not by score.
+
+    bm25 and cosine similarity are not comparable quantities, and normalising
+    them against each other is a tuning problem with no right answer. RRF only
+    asks where an item placed, which is why it needs no weight to tune.
+    """
+    scores: dict[str, float] = {}
+    for ranked in ranked_lists:
+        for rank, item in enumerate(ranked):
+            if not item:
+                continue
+            scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(scores, key=lambda item: scores[item], reverse=True)
 
 
 def _fts_query(text: str) -> str:

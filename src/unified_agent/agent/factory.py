@@ -8,6 +8,7 @@ from typing import Any
 
 from unified_agent.agent.runtime import AgentRuntime, ProgressHook
 from unified_agent.config import Settings
+from unified_agent.memory import MemoryService, build_memory_service
 from unified_agent.models.registry import ModelRegistry
 from unified_agent.observability.jsonl import JsonlSink
 from unified_agent.observability.bus import BusSink, EventBus
@@ -43,6 +44,7 @@ class Agent:
     redactor: Redactor
     sink: JsonlSink
     mcp_problems: list[str] = field(default_factory=list)
+    memory: MemoryService | None = None
     bus: EventBus | None = None
     sandbox: object | None = None
     sandbox_selection: object | None = None
@@ -112,7 +114,11 @@ async def build_agent(
         registry.register(tool)
     for tool in build_net_tools(allow_check=lambda url: engine.check_url(url).allowed):
         registry.register(tool)
-    for tool in build_memory_tools(store):
+    models_for_memory = models or ModelRegistry(settings)
+    memory = build_memory_service(
+        settings=settings, store=store, model=models_for_memory.try_get(settings.default_model)
+    )
+    for tool in build_memory_tools(store, memory=memory):
         registry.register(tool)
     for tool in build_git_tools(
         known_secrets=secrets, sandbox=sandbox, sandbox_mode=settings.sandbox.mode
@@ -140,7 +146,7 @@ async def build_agent(
     load_result = skills.discover(known_tools=set(registry.names()))
     store_skills(store, load_result.loaded)
 
-    models = models or ModelRegistry(settings)
+    models = models_for_memory
     runtime = AgentRuntime(
         settings=settings,
         store=store,
@@ -150,6 +156,7 @@ async def build_agent(
         skills=skills,
         on_progress=on_progress,
         bus=bus,
+        memory=memory,
     )
     return Agent(
         settings=settings,
@@ -162,6 +169,7 @@ async def build_agent(
         redactor=redactor,
         sink=sink,
         mcp_problems=mcp_problems,
+        memory=memory,
         bus=bus,
         sandbox=sandbox,
         sandbox_selection=selection,

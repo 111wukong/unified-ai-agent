@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-308%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-362%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -189,6 +189,10 @@ src/unified_agent/
 │   ├── mcp.py          MCP stdio 客户端（双协议时代）
 │   ├── memory_tools.py save_memory / search_memory / load_skill / update_plan / finish
 │   └── registry.py
+├── memory/
+│   ├── embeddings.py   向量提供方：OpenAI 兼容 / 离线哈希 / 无
+│   ├── vector.py       cosine 检索，sqlite-vec 加速、纯 Python 兜底
+│   └── extract.py      抽取 + 矛盾调和（add/update/duplicate/none）
 ├── desktop/
 │   ├── launcher.py     服务线程 + 系统 webview 窗口 + 健康门
 │   ├── bundle.py       .app 打包 + 纯标准库生成图标
@@ -272,6 +276,38 @@ curl -N -X POST http://127.0.0.1:8000/agui \
 
 ---
 
+## 记忆：难的不是检索，是矛盾
+
+```bash
+uaa memory stats                              # 存了什么、向量到底可不可用
+uaa memory search "部署流程" --mode hybrid     # FTS5 + 向量，RRF 融合
+uaa memory reindex                            # 给还没向量的记忆补上
+uaa memory history <id>                       # 这条记忆以前是什么
+```
+
+调研 Mem0 / Letta / Zep 三家后收敛到同一个结论：**Agent 记忆的难点不是检索，是矛盾**。只会追加的存储会同时返回「项目用 pytest」和「已迁移到 unittest」，然后让模型去猜哪个是当前的。
+
+所以写入路径是两段：
+
+1. **抽取**——任务结束后提炼原子事实（就是反思那一步）。
+2. **调和**——把每条候选和它最近的邻居比对，判 `add` / `update` / `duplicate` / `none`。
+
+`update` **不覆盖**：旧行留着、`superseded_by` 指向前方、`memory_revisions` 指向后方。所以 `uaa memory history` 还能回答「这条以前是什么」——这正是 Zep 用「失效」而非「替换」的理由。
+
+**成本控制决定了它能不能用**：只有存在邻居时才调模型。一条真正的新事实是免费的，而那是绝大多数情况。
+
+三层各司其职，不是三选一：
+
+| | 负责 | 什么时候不可用 |
+|---|---|---|
+| FTS5 trigram | 精确词；**唯一**支持中文两字查询的 | 从不 |
+| 向量（cosine） | 语义近邻，sqlite-vec 加速 | 没配 embedding 模型时退化为字符 n-gram 哈希 |
+| curator | 抽取 + 矛盾调和 | 没有模型时退化为精确去重 |
+
+**离线回退是诚实的**：字符 n-gram 哈希抓的是**形式**不是**含义** —— 它能聚类近似重复和词形变化，但不会把「测试很慢」和「pytest 要四十秒」联系起来。`uaa memory stats` 会明说 `semantic: no`，而不是让结果看起来像语义检索。
+
+---
+
 ## 桌面端：系统 webview，不是 Electron
 
 ```bash
@@ -338,7 +374,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 | 阶段 | 内容 |
 |---|---|
 | Phase 2 | ✅ FastAPI + SSE/WebSocket（AG-UI）、✅ 沙箱（Seatbelt / Docker） |
-| Phase 3 | ⏸ 向量记忆与矛盾处理（设计已定：Mem0 抽取 + Zep 失效语义）、技能审核流程 |
+| Phase 3 | ✅ 向量记忆与矛盾处理、⏸ 技能审核流程 |
 | Phase 4 | ⏸ YAML 工作流（Dify 形状）、多 Agent（orchestrator-worker）、A2A v1.0 |
 | Phase 5 | ✅ Web 控制台（零构建）、⏸ TypeScript SDK、渠道适配器 |
 
@@ -353,7 +389,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 308 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 362 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```

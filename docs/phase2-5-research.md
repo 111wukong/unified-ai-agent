@@ -385,7 +385,7 @@ SUBMITTED → WORKING → INPUT_REQUIRED / AUTH_REQUIRED
 | AG-UI 编码器 | ✅ | `api/agui.py`，事件名与基础字段照规范 |
 | FastAPI + SSE + WebSocket | ✅ | `api/app.py`，SSE 与 WS 共用同一个事件生成器 |
 | Web 控制台 | ✅ | `api/console/`，零构建原生 JS，直接消费 AG-UI |
-| 向量记忆 + 矛盾处理 | ⏸ | 设计已定（Mem0 抽取 + Zep 失效语义 + sqlite-vec 定位），未实现 |
+| 向量记忆 + 矛盾处理 | ✅ | `memory/`：三层（FTS5 / 向量 / curator），sqlite-vec 只当加速器 |
 | YAML 工作流 | ⏸ | 设计已定（Dify 形状 + `{{#node.field#}}` + 七种节点），未实现 |
 | 多 Agent | ⏸ | 设计已定（orchestrator-worker + 规模规则 + 预算闸门），未实现 |
 | A2A v1.0 | ⏸ | 设计已定（Agent Card + JSON-RPC + SSE + webhook SSRF 防护），未实现 |
@@ -395,3 +395,11 @@ SUBMITTED → WORKING → INPUT_REQUIRED / AUTH_REQUIRED
 1. **Seatbelt 的可用性必须探测，不能靠「二进制存在」。** 在已被沙箱化的进程里，macOS **拒绝**安装一个更窄的 profile（`sandbox_apply: Operation not permitted`）。所以 `available` 会真的去应用一个限制性 profile 试试 —— 用 `(allow default)` 探测是无效的，那在任何环境都能通过，正好掩盖了要防的那种失败。
 2. **沙箱不可用时 `wrap()` 静默直通，这是对的（不能让坏沙箱废掉所有命令），但必须由调用方出声音。** 于是有了 `SandboxSelection.warning()`，`uaa run`/`chat`/`serve`/`doctor` 都会打。否则用户配了 Seatbelt 却在裸跑。
 3. **工具结果必须写进 `TOOL_COMPLETED` 事件，不能只放在 `LOG_APPENDED` 里。** 否则 UI 流出来的 `TOOL_CALL_RESULT` 是空的，`uaa task events` 也只能看到「某个工具跑了」而看不到它说了什么。
+
+
+### Phase 3 实施中的四条修正
+
+1. **sqlite-vec 只做加速器，不做 schema 的主人。** 行仍在我们自己的 `memory_vectors` 表里，扩展只提供 `vec_distance_cosine` 标量函数。这样「装了扩展」和「没装扩展」是同一个数据库的两种速度，而不是两个数据库 —— 两条路径可以互相验证。让扩展拥有 schema 会让它们悄悄漂移，而没有任何测试能发现。
+2. **归一化必须发生在写入侧，不能是调用方的义务。** 两条路径算余弦的方式不同：sqlite-vec 内部归一化，Python 回退是点积。存进未归一化的向量，两者会**正好差在输入偏离单位长度的那一点上** —— 静默的排序差异。测试 `test_the_two_paths_agree` 就是用 `[0.5, 0.5, 0.7]` 抓到的（0.5025 vs 0.5）。
+3. **邻居检索必须是「按词」，不能是「按字面」。** 没有向量时，curator 原本拿候选原文去查 FTS，而 `_fts_query` 把整句当一个词 —— 候选句永远不可能是已存句的子串，于是**矛盾检查永远没有邻居可看**，静默退化成纯追加。改成抽词 OR 检索后才有意义。
+4. **相似度 0 的结果必须丢掉。** 余弦为 0 表示「毫无共同点」，把它当搜索结果返回比少返回更糟。下限是 0.0（只去掉完全无关），**不是**相关性阈值 —— 用语义模型时无关文本也远高于 0，把它包装成质量门槛是骗人的。

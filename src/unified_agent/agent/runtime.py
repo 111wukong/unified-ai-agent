@@ -77,6 +77,7 @@ class AgentRuntime:
         summarizer: Any = None,
         on_progress: ProgressHook | None = None,
         bus: EventBus | None = None,
+        memory: Any = None,
     ) -> None:
         self.settings = settings
         self.store = store
@@ -86,6 +87,7 @@ class AgentRuntime:
         self.skills = skills
         self.on_progress = on_progress
         self.bus = bus
+        self.memory = memory
         self._runner = ToolRunner(
             registry=registry,
             engine=engine,
@@ -296,7 +298,7 @@ class AgentRuntime:
 
             state.steps_used += 1
             await self._maybe_compact(state)
-            memory_block = self._memory_block(state)
+            memory_block = await self._memory_block(state)
             messages = self._context.build(state, memory_block=memory_block)
 
             # --- model call --------------------------------------------
@@ -522,8 +524,20 @@ class AgentRuntime:
             env=scrub_env(known_secrets=self.settings.secret_values()),
         )
 
-    def _memory_block(self, state: AgentState) -> str:
-        hits = self.store.search_memories(state.goal[:60], limit=5)
+    async def _memory_block(self, state: AgentState) -> str:
+        """Recalled memories, hybrid when a provider is configured.
+
+        The query is the goal rather than the last observation: at this point
+        in the loop the goal is what defines relevance, and embedding a
+        changing query every step would make the recalled set flicker.
+        """
+        if self.memory is not None:
+            try:
+                hits = await self.memory.recall(state.goal[:200], limit=5)
+            except Exception:  # noqa: BLE001 - recall must never break a task
+                hits = []
+        else:
+            hits = self.store.search_memories(state.goal[:60], limit=5)
         if not hits:
             return ""
         lines = ["# Recalled memories", ""]

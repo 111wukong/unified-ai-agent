@@ -40,21 +40,59 @@ class SaveMemoryTool(Tool):
         effect_class=EffectClass.WRITE_LOCAL,
     )
 
-    def __init__(self, store) -> None:
+    def __init__(self, store, memory: Any = None) -> None:
         self.store = store
+        self.memory = memory
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         if ctx.dry_run:
             return self.dry_run(args, ctx)
-        mid = self.store.add_memory(
-            content=args["content"],
+        content = args["content"]
+        scope = args.get("scope") or "project"
+
+        if self.memory is None:
+            mid = self.store.add_memory(
+                content=content,
+                session_id=ctx.session_id,
+                scope=scope,
+                tags=args.get("tags") or [],
+                importance=float(args.get("importance", 0.5)),
+                source="agent",
+            )
+            return ToolResult(success=True, output=f"memory saved ({mid})", metadata={"id": mid})
+
+        # Goes through the curator so a fact that contradicts a stored one
+        # replaces it instead of sitting beside it. The result says which
+        # happened, because "saved" and "replaced an older fact" are different
+        # outcomes and the model should know which one it got.
+        outcome = await self.memory.remember_text(
+            content,
+            scope=scope,
             session_id=ctx.session_id,
-            scope=args.get("scope") or "project",
-            tags=args.get("tags") or [],
-            importance=float(args.get("importance", 0.5)),
             source="agent",
+            tags=args.get("tags") or [],
         )
-        return ToolResult(success=True, output=f"memory saved ({mid})", metadata={"id": mid})
+        decision = outcome.decisions[0] if outcome.decisions else None
+        verdict = decision.verdict.value if decision else "add"
+        detail = f"memory {verdict}"
+        if outcome.updated:
+            old_id, new_id = outcome.updated[0]
+            detail = f"memory replaced {old_id} with {new_id} ({decision.reason if decision else ''})"
+        elif outcome.added:
+            detail = f"memory saved ({outcome.added[0]})"
+        elif outcome.duplicated:
+            detail = "memory already known; nothing written"
+        elif outcome.rejected:
+            detail = "memory rejected as not worth keeping"
+        return ToolResult(
+            success=True,
+            output=detail,
+            metadata={
+                "verdict": verdict,
+                "added": outcome.added,
+                "updated": [list(pair) for pair in outcome.updated],
+            },
+        )
 
 
 class SearchMemoryTool(Tool):
@@ -74,13 +112,19 @@ class SearchMemoryTool(Tool):
         effect_class=EffectClass.READ_ONLY,
     )
 
-    def __init__(self, store) -> None:
+    def __init__(self, store, memory: Any = None) -> None:
         self.store = store
+        self.memory = memory
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        hits = self.store.search_memories(
-            args["query"], scope=args.get("scope"), limit=int(args.get("limit") or 8)
-        )
+        if self.memory is not None:
+            hits = await self.memory.recall(
+                args["query"], scope=args.get("scope"), limit=int(args.get("limit") or 8)
+            )
+        else:
+            hits = self.store.search_memories(
+                args["query"], scope=args.get("scope"), limit=int(args.get("limit") or 8)
+            )
         if not hits:
             return ToolResult(success=True, output="(no memories matched)", metadata={"count": 0})
         lines = [
@@ -246,8 +290,12 @@ class FinishTool(Tool):
         )
 
 
-def build_memory_tools(store) -> list[Tool]:
-    return [SaveMemoryTool(store), SearchMemoryTool(store), DeleteMemoryTool(store)]
+def build_memory_tools(store, memory: Any = None) -> list[Tool]:
+    return [
+        SaveMemoryTool(store, memory),
+        SearchMemoryTool(store, memory),
+        DeleteMemoryTool(store),
+    ]
 
 
 def build_skill_tools(skills) -> list[Tool]:

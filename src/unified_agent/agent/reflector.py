@@ -72,10 +72,22 @@ class Reflection:
 
 
 class Reflector:
-    def __init__(self, *, model: ChatModel, settings: Settings, store: Any) -> None:
+    def __init__(
+        self,
+        *,
+        model: ChatModel,
+        settings: Settings,
+        store: Any,
+        memory: Any = None,
+    ) -> None:
         self.model = model
         self.settings = settings
         self.store = store
+        # When present, extracted facts go through the curator, which
+        # reconciles them against what is already stored. Without it the
+        # reflector appends, and an appended contradiction is exactly the
+        # problem the curator exists to prevent.
+        self.memory = memory
 
     def response_format(self) -> dict[str, Any] | None:
         caps = self.model.capabilities
@@ -135,24 +147,50 @@ class Reflector:
         return Reflection(memories=memories, skill_candidate=candidate)
 
     async def run_and_persist(self, state: AgentState) -> Reflection:
+        from unified_agent.memory.extract import Candidate
+
         reflection = await self.reflect(state)
-        for item in reflection.memories[:5]:
-            content = str(item.get("content") or "").strip()
-            if len(content) < 8:
-                continue
-            mid = self.store.add_memory(
-                content=content,
-                session_id=state.session_id,
-                scope="project",
+        candidates = [
+            Candidate(
+                content=str(item.get("content") or "").strip(),
                 tags=[str(t) for t in (item.get("tags") or [])],
                 importance=float(item.get("importance", 0.5)),
-                source="reflection",
             )
-            self.store.append(
-                state.task_id,
-                EventType.MEMORY_WRITTEN,
-                {"id": mid, "content": content, "tags": item.get("tags") or []},
+            for item in reflection.memories[:5]
+            if len(str(item.get("content") or "").strip()) >= 8
+        ]
+
+        if self.memory is not None and candidates:
+            outcome = await self.memory.remember(
+                candidates, scope="project", session_id=state.session_id, source="reflection"
             )
+            for memory_id in outcome.added:
+                self.store.append(
+                    state.task_id,
+                    EventType.MEMORY_WRITTEN,
+                    {"id": memory_id, "verdict": "add"},
+                )
+            for old_id, new_id in outcome.updated:
+                self.store.append(
+                    state.task_id,
+                    EventType.MEMORY_WRITTEN,
+                    {"id": new_id, "verdict": "update", "superseded": old_id},
+                )
+        else:
+            for candidate in candidates:
+                memory_id = self.store.add_memory(
+                    content=candidate.content,
+                    session_id=state.session_id,
+                    scope="project",
+                    tags=candidate.tags,
+                    importance=candidate.importance,
+                    source="reflection",
+                )
+                self.store.append(
+                    state.task_id,
+                    EventType.MEMORY_WRITTEN,
+                    {"id": memory_id, "verdict": "add", "content": candidate.content},
+                )
         if reflection.skill_candidate:
             path = self.write_candidate(reflection.skill_candidate, state)
             self.store.append(

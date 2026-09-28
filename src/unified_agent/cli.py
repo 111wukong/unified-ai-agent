@@ -189,7 +189,12 @@ async def _maybe_reflect(agent, result, *, quiet: bool) -> None:
 
     try:
         state = replay(agent.store.events(result.task_id), task_id=result.task_id)
-        reflector = Reflector(model=agent.models.get(), settings=agent.settings, store=agent.store)
+        reflector = Reflector(
+            model=agent.models.get(),
+            settings=agent.settings,
+            store=agent.store,
+            memory=getattr(agent, "memory", None),
+        )
         if not reflector.worth_running(state):
             return
         reflection = await reflector.run_and_persist(state)
@@ -773,24 +778,141 @@ def memory_list(
 def memory_search(
     query: str,
     limit: int = typer.Option(8, "--limit", "-n"),
+    mode: str = typer.Option("auto", "--mode", help="auto | fts | vector | hybrid"),
     home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Full-text search over memories (FTS5 trigram, LIKE fallback for short queries)."""
-    settings = _settings(home, None)
+    """Search memories.
+
+    `hybrid` merges FTS5 and vector results by reciprocal rank fusion, which
+    needs no weight tuning because it compares positions rather than scores.
+    `auto` picks hybrid when an embedding provider is configured.
+    """
+    settings = _settings(home, workspace)
+    from unified_agent.memory import build_memory_service
     from unified_agent.storage.store import Store
 
     store = Store(settings.db_path)
     try:
-        rows = store.search_memories(query, limit=limit)
+        memory = build_memory_service(settings=settings, store=store)
+        rows = asyncio.run(memory.recall(query, limit=limit, mode=mode))
+        if mode == "auto" and not memory.embeddings.available:
+            console.print(
+                f"[dim]vectors: {escape(memory.embeddings.describe())} — set "
+                "[cyan]memory.embedding_model[/cyan] for semantic search[/dim]"
+            )
     finally:
         store.close()
     if not rows:
         console.print("[dim]no matches[/dim]")
         return
     for row in rows:
+        score = f" [dim]{row['similarity']:.3f}[/dim]" if "similarity" in row else ""
         console.print(
-            f"[dim]{row['id']}[/dim] [{row['scope']}] {escape(row['content'][:160])}"
+            f"[dim]{row['id']}[/dim] [{row['scope']}]{score} {escape(row['content'][:160])}"
         )
+
+
+@memory_app.command("stats")
+def memory_stats(
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """What is stored, and whether vector search is actually available."""
+    settings = _settings(home, workspace)
+    from unified_agent.memory import build_memory_service
+    from unified_agent.storage.store import Store
+
+    store = Store(settings.db_path)
+    try:
+        stats = build_memory_service(settings=settings, store=store).stats()
+    finally:
+        store.close()
+
+    console.print(f"active:      [bold]{stats['active']}[/bold]")
+    console.print(f"superseded:  {stats['superseded']}")
+    if stats["by_source"]:
+        console.print(
+            "by source:   "
+            + ", ".join(f"{k}={v}" for k, v in sorted(stats["by_source"].items()))
+        )
+    if stats["by_scope"]:
+        console.print(
+            "by scope:    "
+            + ", ".join(f"{k}={v}" for k, v in sorted(stats["by_scope"].items()))
+        )
+    vectors = stats["vectors"]
+    console.print()
+    console.print(f"embeddings:  {escape(str(stats['embeddings']))}")
+    console.print(f"semantic:    {'yes' if stats['semantic'] else '[yellow]no[/yellow]'}")
+    console.print(f"accelerator: {escape(str(vectors['accelerator']))}")
+    console.print(f"vectors:     {vectors['vectors']}")
+    for entry in vectors["models"]:
+        console.print(f"  {escape(str(entry['model']))} dim={entry['dim']} n={entry['count']}")
+    if not stats["semantic"]:
+        console.print()
+        console.print(
+            "[dim]The offline fallback hashes character n-grams: it finds "
+            "near-duplicates, not meaning. Set [cyan]memory.embedding_model[/cyan] "
+            "for real semantic search.[/dim]"
+        )
+
+
+@memory_app.command("reindex")
+def memory_reindex(
+    scope: Optional[str] = typer.Option(None, "--scope"),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Embed memories that have no vector for the current embedding model."""
+    settings = _settings(home, workspace)
+    from unified_agent.memory import build_memory_service
+    from unified_agent.storage.store import Store
+
+    store = Store(settings.db_path)
+    try:
+        result = asyncio.run(
+            build_memory_service(settings=settings, store=store).reindex(scope=scope)
+        )
+    finally:
+        store.close()
+
+    console.print(f"provider: {escape(str(result['provider']))}")
+    console.print(f"embedded: {result['embedded']} / {result['pending']}")
+    if note := result.get("note"):
+        console.print(f"[yellow]{escape(str(note))}[/yellow]")
+
+
+@memory_app.command("history")
+def memory_history(
+    memory_id: str,
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Show what a memory replaced, and what replaced it.
+
+    This is what invalidating instead of overwriting buys: the store can
+    still answer "what did this used to be".
+    """
+    settings = _settings(home, workspace)
+    from unified_agent.memory import build_memory_service
+    from unified_agent.storage.store import Store
+
+    store = Store(settings.db_path)
+    try:
+        chain = build_memory_service(settings=settings, store=store).history(memory_id)
+    finally:
+        store.close()
+
+    if not chain:
+        err_console.print(f"unknown memory {memory_id}")
+        raise typer.Exit(1)
+    for index, entry in enumerate(chain):
+        marker = "[green]current[/green]" if not entry["superseded_by"] else "[dim]superseded[/dim]"
+        arrow = "  " if index == 0 else "← "
+        console.print(f"{arrow}{marker} [dim]{entry['id']}[/dim] {escape(entry['content'][:150])}")
+        if entry["replaced_reason"]:
+            console.print(f"      [dim]reason: {escape(entry['replaced_reason'][:120])}[/dim]")
 
 
 @memory_app.command("add")
