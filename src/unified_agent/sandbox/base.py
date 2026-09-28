@@ -72,14 +72,23 @@ class ProbeResult:
         return self.ok
 
 
-@dataclass
 class Sandbox:
-    """Base class. `probe()` must actually try the thing."""
+    """Base class. `probe()` must actually try the thing.
+
+    Deliberately a plain class, not a dataclass. As a dataclass, the field
+    defaults for `name` and `isolation` are assigned by `__init__` and
+    *shadow* the subclass class attributes -- so every backend reported
+    `name="none"` even while it was actively isolating. A sandbox that works
+    but says it does not is as damaging as one that says it does and does
+    not: it teaches the user to distrust the report.
+    """
 
     name: str = "none"
     isolation: str = "none"
-    fallback_reason: str | None = None
-    _probe: ProbeResult | None = field(default=None, repr=False)
+
+    def __init__(self) -> None:
+        self.fallback_reason: str | None = None
+        self._probe: ProbeResult | None = None
 
     def probe(self) -> ProbeResult:
         return ProbeResult(True, "no isolation to verify")
@@ -119,6 +128,9 @@ class NoSandbox(Sandbox):
 
     name = "none"
     isolation = "none"
+
+    def __init__(self) -> None:
+        super().__init__()
 
     def caveats(self) -> list[str]:
         return [

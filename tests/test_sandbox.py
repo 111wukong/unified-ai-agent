@@ -20,6 +20,7 @@ from unified_agent.sandbox import (
     NoSandbox,
     ProbeResult,
     SandboxMode,
+    SandboxSelection,
     SeatbeltSandbox,
     build_sandbox,
     seatbelt_probe,
@@ -39,10 +40,12 @@ class TestProbeHonesty:
         broken, when the real answer is "run this from your terminal".
         """
         result = seatbelt_probe()
+        assert result.detail, "a probe must explain itself in every outcome"
         if result.ok:
-            pytest.skip("running unsandboxed: the nested case cannot be reproduced here")
+            assert "applied" in result.detail
+            return
         # The failure must be *described*, not just reported as a number.
-        assert result.detail and not result.detail.startswith("exit ")
+        assert not result.detail.startswith("exit ")
         assert any(
             token in result.detail
             for token in ("Operation not permitted", "not found", "not macOS", "killed by")
@@ -210,15 +213,25 @@ class TestSelection:
         assert selection.sandbox.name == "none"
         assert not selection.fell_back
 
-    def test_fallback_records_a_reason(self, tmp_path) -> None:  # noqa: ANN001
-        """A silent downgrade to no isolation is the failure this prevents."""
-        selection = build_sandbox("seatbelt", home=tmp_path)
-        if selection.sandbox.name == "seatbelt":
-            pytest.skip("seatbelt works here; the fallback path cannot be exercised")
+    def test_fallback_records_a_reason(self) -> None:
+        """A silent downgrade to no isolation is the failure this prevents.
+
+        Constructed rather than probed: the real answer depends on the host,
+        and a test whose assertions change with the environment is not
+        testing the contract.
+        """
+        selection = SandboxSelection(
+            NoSandbox(), "seatbelt", notes=["seatbelt unavailable: stubbed failure"]
+        )
         assert selection.fell_back
         assert selection.notes, "falling back must leave a trail"
-        assert any("seatbelt" in note for note in selection.notes)
-        assert selection.sandbox.name in {"docker", "none"}
+        assert "fell back" in selection.summary()
+
+    def test_real_selection_always_reports_something(self, tmp_path) -> None:  # noqa: ANN001
+        selection = build_sandbox("seatbelt", home=tmp_path)
+        assert selection.sandbox is not None
+        assert selection.summary()
+        assert selection.sandbox.probe_detail
 
     def test_auto_never_raises(self, tmp_path) -> None:  # noqa: ANN001
         selection = build_sandbox("auto", home=tmp_path)
@@ -288,19 +301,59 @@ class TestSandboxWiring:
 class TestFallbackWarning:
     """`wrap` no-ops when the backend is unavailable, so the caller must say so."""
 
-    def test_warning_when_the_requested_backend_is_unavailable(self, tmp_path) -> None:  # noqa: ANN001
-        selection = build_sandbox("seatbelt", home=tmp_path)
-        if selection.sandbox.name == "seatbelt":
-            pytest.skip("seatbelt works here; the fallback path cannot be exercised")
+    def test_warning_when_the_requested_backend_is_unavailable(self) -> None:
+        selection = SandboxSelection(
+            NoSandbox(), "seatbelt", notes=["seatbelt unavailable: stubbed failure"]
+        )
         warning = selection.warning()
         assert warning, "a silent downgrade is the bug this prevents"
-        assert "unsandboxed" in warning or "fell back" in warning
+        assert "unsandboxed" in warning
 
-    def test_no_warning_when_none_was_requested(self, tmp_path) -> None:  # noqa: ANN001
-        assert build_sandbox("none", home=tmp_path).warning() is None
+    def test_warning_when_it_fell_back_to_a_weaker_backend(self) -> None:
+        selection = SandboxSelection(DockerSandbox(), "seatbelt", notes=[])
+        warning = selection.warning()
+        assert warning and "fell back" in warning
 
-    def test_no_warning_when_the_request_is_satisfied(self, tmp_path) -> None:  # noqa: ANN001
-        selection = build_sandbox("auto", home=tmp_path)
-        if selection.sandbox.name == "none":
-            pytest.skip("no backend available here")
+    def test_no_warning_when_none_was_requested(self) -> None:
+        assert SandboxSelection(NoSandbox(), "none", notes=[]).warning() is None
+
+    def test_no_warning_when_the_request_is_satisfied(self) -> None:
+        sandbox = SeatbeltSandbox.__new__(SeatbeltSandbox)
+        sandbox.__dict__.update(NoSandbox().__dict__)
+        selection = SandboxSelection(sandbox, "seatbelt", notes=[])
+        selection.sandbox.name = "seatbelt"
+        selection.sandbox._probe = ProbeResult(True, "stubbed")
         assert selection.warning() is None
+
+
+class TestBackendsIdentifyThemselves:
+    """Each backend must report its own name and isolation strength.
+
+    The bug these guard against: `Sandbox` was a dataclass, so its field
+    defaults for `name`/`isolation` were assigned by `__init__` and shadowed
+    the subclass class attributes. Every backend reported `name="none"` even
+    while it was actively isolating -- a sandbox that works but says it does
+    not is as damaging as the reverse.
+    """
+
+    def test_each_backend_reports_its_own_name(self, tmp_path: Path) -> None:
+        assert NoSandbox().name == "none"
+        assert SeatbeltSandbox(home=tmp_path).name == "seatbelt"
+        assert DockerSandbox().name == "docker"
+
+    def test_each_backend_reports_its_own_isolation(self, tmp_path: Path) -> None:
+        assert NoSandbox().isolation == "none"
+        assert "process" in SeatbeltSandbox(home=tmp_path).isolation
+        assert "container" in DockerSandbox().isolation
+
+    def test_describe_mentions_the_backend(self, tmp_path: Path) -> None:
+        assert "seatbelt" in SeatbeltSandbox(home=tmp_path).describe()
+        assert "docker" in DockerSandbox().describe()
+
+    def test_a_subclass_attribute_is_not_shadowed_by_construction(self, tmp_path: Path) -> None:
+        """Constructing twice must not change what the class reports."""
+        first = SeatbeltSandbox(home=tmp_path)
+        second = SeatbeltSandbox(home=tmp_path)
+        assert first.name == second.name == SeatbeltSandbox.name == "seatbelt"
+
+
