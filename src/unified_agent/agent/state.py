@@ -119,6 +119,31 @@ class LogEntry(BaseModel):
             return f"[{self.index}] SYSTEM: {text}"
         return f"[{self.index}] assistant: {text}"
 
+    def digest(self) -> str:
+        """One line: what was called, whether it worked, how much came back.
+
+        Used for entries old enough that their *body* is no longer worth the
+        tokens. The head is what stays useful -- "I already read app.py and it
+        worked" is the fact the model needs to avoid repeating the call; the
+        400 lines that came back are what it can no longer afford.
+
+        Cheaper than an LLM summary and lossless in the way that matters: no
+        information about *which* calls happened is dropped, only their
+        output.
+        """
+        if self.kind != "tool":
+            return self.render(max_chars=400)
+        status = "ok" if self.success else "FAILED"
+        flags = []
+        if self.ambiguous:
+            flags.append("OUTCOME UNKNOWN")
+        if self.replayed:
+            flags.append("re-run")
+        suffix = f" [{', '.join(flags)}]" if flags else ""
+        size = len(self.text or "")
+        detail = f"{size} chars elided" if size else "no output"
+        return f"[{self.index}] {self.tool}({_compact_args(self.arguments)}) -> {status}{suffix} ({detail})"
+
 
 def _compact_args(args: dict[str, Any], limit: int = 160) -> str:
     import json

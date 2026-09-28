@@ -60,6 +60,48 @@ def _matches_glob(rel: str, name: str, pattern: str) -> bool:
     return any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(name, p) for p in candidates)
 
 
+def _syntax_problem(path: Path, text: str) -> str | None:
+    """Why this text will not parse as the file's language, or None.
+
+    Catches the edit that lands cleanly and leaves a file nothing can read.
+    Without it the mistake surfaces several steps later as a confusing test
+    failure, and a model reasoning from a broken premise usually "fixes"
+    something else first. SWE-agent's finding is that running a parser and
+    refusing the edit costs one turn and saves several.
+
+    Only languages already installed are checked. Adding a dependency to
+    catch a class of error the model fixes in one turn is a bad trade, so
+    this is Python / JSON / TOML / YAML and nothing else -- and an extension
+    with no checker is simply not checked, rather than guessed at.
+    """
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".py":
+            import ast
+
+            ast.parse(text, filename=str(path))
+        elif suffix == ".json":
+            import json
+
+            json.loads(text)
+        elif suffix == ".toml":
+            import tomllib
+
+            tomllib.loads(text)
+        elif suffix in {".yaml", ".yml"}:
+            import yaml
+
+            list(yaml.safe_load_all(text))
+    except Exception as exc:  # noqa: BLE001 - every parser raises its own type
+        return f"{suffix} does not parse: {type(exc).__name__}: {_first_line(exc)}"
+    return None
+
+
+def _first_line(exc: Exception) -> str:
+    lines = [ln for ln in str(exc).splitlines() if ln.strip()]
+    return (lines[0] if lines else type(exc).__name__)[:200]
+
+
 class ReadFileTool(Tool):
     spec = ToolSpec(
         name="read_file",
@@ -128,7 +170,9 @@ class WriteFileTool(Tool):
         description=(
             "Create or overwrite a text file. Parent directories are created. "
             "Overwriting an existing file replaces it entirely — use apply_patch "
-            "for targeted edits."
+            "for targeted edits. The result is parsed before it is written for "
+            ".py/.json/.toml/.yaml files; a file that will not parse is refused "
+            "rather than left on disk for a later step to trip over."
         ),
         parameters={
             "type": "object",
@@ -139,6 +183,14 @@ class WriteFileTool(Tool):
                     "type": "string",
                     "enum": ["overwrite", "append"],
                     "description": "Default overwrite.",
+                },
+                "allow_syntax_errors": {
+                    "type": "boolean",
+                    "description": (
+                        "Set only when the file is deliberately not valid for its "
+                        "extension (a fixture for a parser test, a template with "
+                        "placeholders). The default refuses."
+                    ),
                 },
             },
             "required": ["path", "content"],
@@ -156,14 +208,25 @@ class WriteFileTool(Tool):
         if ctx.dry_run:
             return self.dry_run(args, ctx)
         mode = args.get("mode") or "overwrite"
+        content = args["content"]
+        if mode == "overwrite" and not args.get("allow_syntax_errors"):
+            if problem := _syntax_problem(path, content):
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"refusing to write {_rel(path, ctx.workspace)}: {problem}. "
+                        "Fix the content, or set allow_syntax_errors=true if the "
+                        "file is intentionally not valid."
+                    ),
+                )
         existed = path.exists()
         before = path.stat().st_size if existed else 0
         path.parent.mkdir(parents=True, exist_ok=True)
         if mode == "append":
             with path.open("a", encoding="utf-8") as fh:
-                fh.write(args["content"])
+                fh.write(content)
         else:
-            path.write_text(args["content"], encoding="utf-8")
+            path.write_text(content, encoding="utf-8")
         after = path.stat().st_size
         verb = "appended to" if mode == "append" else ("overwrote" if existed else "created")
         return ToolResult(
@@ -180,7 +243,10 @@ class ApplyPatchTool(Tool):
             "Apply exact-string replacements to a file. Each edit replaces the first "
             "occurrence of `old` with `new` (or every occurrence when replace_all). "
             "`old` must match byte-for-byte including indentation, and must be unique "
-            "unless replace_all is set. All edits are validated before anything is written."
+            "unless replace_all is set. Every edit is matched against the file as it "
+            "is now, so the order of the edits does not matter. All edits are "
+            "validated before anything is written, and the result is parsed before "
+            "it lands."
         ),
         parameters={
             "type": "object",
@@ -200,6 +266,13 @@ class ApplyPatchTool(Tool):
                         "additionalProperties": False,
                     },
                 },
+                "allow_syntax_errors": {
+                    "type": "boolean",
+                    "description": (
+                        "Set only when the result is deliberately not valid for the "
+                        "file's extension. The default refuses."
+                    ),
+                },
             },
             "required": ["path", "edits"],
             "additionalProperties": False,
@@ -216,11 +289,17 @@ class ApplyPatchTool(Tool):
         if not path.exists():
             return ToolResult(success=False, error=f"no such file: {path}")
         original = path.read_text(encoding="utf-8")
-        text = original
-        applied = 0
+
+        # Every edit is resolved against the file as it is *now*, then applied
+        # by descending offset. Applying them one after another to a mutating
+        # string looks equivalent and is not: a later `old` can match text an
+        # earlier `new` just inserted (landing somewhere the model never
+        # intended), and an earlier edit can delete the text a later one
+        # needed. Both failures produce a file that looks edited and is wrong.
+        spans: list[tuple[int, int, str, int]] = []
         for i, edit in enumerate(args["edits"]):
             old, new = edit["old"], edit["new"]
-            count = text.count(old)
+            count = original.count(old)
             if count == 0:
                 return ToolResult(
                     success=False,
@@ -238,15 +317,53 @@ class ApplyPatchTool(Tool):
                         "context to make it unique, or set replace_all=true"
                     ),
                 )
-            text = text.replace(old, new) if edit.get("replace_all") else text.replace(old, new, 1)
-            applied += 1
+            if edit.get("replace_all"):
+                start = 0
+                while (found := original.find(old, start)) != -1:
+                    spans.append((found, found + len(old), new, i))
+                    start = found + len(old)
+            else:
+                at = original.index(old)
+                spans.append((at, at + len(old), new, i))
+
+        # Overlapping spans would make the result depend on application order
+        # again, which is the thing this shape exists to remove.
+        spans.sort()
+        for (_start_a, end_a, _, edit_a), (start_b, _, _, edit_b) in zip(
+            spans, spans[1:], strict=False
+        ):
+            if end_a > start_b:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"edits #{edit_a + 1} and #{edit_b + 1} overlap in "
+                        f"{_rel(path, ctx.workspace)}. Merge them into one edit so the "
+                        "result does not depend on which is applied first."
+                    ),
+                )
+
+        text = original
+        for start, end, new, _ in sorted(spans, key=lambda span: span[0], reverse=True):
+            text = text[:start] + new + text[end:]
+
+        if not args.get("allow_syntax_errors"):
+            if problem := _syntax_problem(path, text):
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"refusing to write {_rel(path, ctx.workspace)}: the edited "
+                        f"result {problem}. Nothing was written. Fix the edit, or set "
+                        "allow_syntax_errors=true if the file is intentionally not valid."
+                    ),
+                )
+
         if ctx.dry_run:
             return self.dry_run(args, ctx)
         path.write_text(text, encoding="utf-8")
         return ToolResult(
             success=True,
-            output=f"applied {applied} edit(s) to {_rel(path, ctx.workspace)}",
-            metadata={"path": str(path), "edits": applied},
+            output=f"applied {len(args['edits'])} edit(s) to {_rel(path, ctx.workspace)}",
+            metadata={"path": str(path), "edits": len(args["edits"])},
         )
 
 

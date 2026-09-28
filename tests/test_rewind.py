@@ -196,7 +196,11 @@ class TestRewindPlan:
         """`--from-seq` undoes only the later writes: the state before the
         first write at or after that sequence number."""
         agent, _ = await scripted(
-            [write("app.py", "first change\n"), write("app.py", "second change\n"), {"content": "done"}]
+            [
+                write("app.py", "first_change = 1\n"),
+                write("app.py", "second_change = 2\n"),
+                {"content": "done"},
+            ]
         )
         result = await agent.runtime.run("edit twice", session_id=session_id)
         events = agent.store.events(result.task_id)
@@ -212,14 +216,14 @@ class TestRewindPlan:
         assert [s.action for s in plan.steps] == ["restore"]
         apply_rewind(plan)
         # Back to the state before the *second* write, not the original.
-        assert (workspace / "app.py").read_text() == "first change\n"
+        assert (workspace / "app.py").read_text() == "first_change = 1\n"
 
     async def test_an_unrestorable_checkpoint_is_reported_not_skipped(
         self, scripted, session_id: str, workspace: Path, settings  # noqa: ANN001
     ) -> None:
         """A file too large to snapshot must be named. A partial restore that
         silently omits a file is worse than one that says what it could not do."""
-        agent, _ = await scripted([write("app.py", "small change\n"), {"content": "done"}])
+        agent, _ = await scripted([write("app.py", "small_change = 1\n"), {"content": "done"}])
         result = await agent.runtime.run("edit it", session_id=session_id)
 
         store = Store(settings.db_path)

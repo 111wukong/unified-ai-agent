@@ -7,10 +7,13 @@ fallback that works with no summariser model available.
 
 from __future__ import annotations
 
+from pathlib import Path
 
 from unified_agent.agent.context import ContextBuilder, _digest
 from unified_agent.agent.state import AgentState, LogEntry, PlanStep, TaskStatus
+from unified_agent.config import AgentConfig, ModelSpec, Settings
 from unified_agent.models.base import estimate_tokens
+from unified_agent.models.mock import MockModel
 from unified_agent.observability.events import EventType
 
 from tests.conftest import looping_script
@@ -216,3 +219,98 @@ class TestTokenEstimation:
 
     def test_empty_input(self) -> None:
         assert estimate_tokens("") == 0
+
+
+class TestOldEntriesKeepTheirHead:
+    """Two tiers, and the free one carries the history.
+
+    Squeezing an old tool result to a smaller body still spends the tokens,
+    and when the budget runs out the oldest entries are dropped whole -- so
+    the model loses the record of what it already did and re-runs calls whose
+    results it can no longer see. A digest costs a few dozen characters, so
+    the entire action history fits.
+    """
+
+    def test_a_digest_names_the_call_the_status_and_the_size(self) -> None:
+        entry = LogEntry(
+            index=7,
+            kind="tool",
+            tool="read_file",
+            arguments={"path": "app.py"},
+            success=True,
+            text="x" * 4_000,
+        )
+        line = entry.digest()
+        assert "read_file" in line
+        assert "app.py" in line
+        assert "-> ok" in line
+        assert "4000 chars elided" in line
+        assert len(line) < 200, "a digest that is not small defeats the purpose"
+
+    def test_a_digest_keeps_the_ambiguous_marker(self) -> None:
+        """The one flag the model must not lose: this call's outcome is
+        unknown, so re-running it may double-execute."""
+        entry = LogEntry(
+            index=3, kind="tool", tool="run_command", arguments={"command": "git commit"}, success=False
+        )
+        entry.ambiguous = True
+        assert "OUTCOME UNKNOWN" in entry.digest()
+
+    def test_old_entries_are_digested_and_recent_ones_are_not(self) -> None:
+        builder = _builder(keep=2)
+        state = _state()
+        for i in range(6):
+            state.append_log(
+                LogEntry(
+                    index=0,
+                    kind="tool",
+                    tool=f"tool_{i}",
+                    arguments={"path": f"f{i}.py"},
+                    success=True,
+                    text="BODY" * 500,
+                )
+            )
+
+        rendered = builder._render_log(state, chars=40_000)
+        # The two newest keep their bodies; the older four are digests.
+        assert rendered.count("BODY") > 0, "the recent entries lost their bodies"
+        assert "tool_0" in rendered, "an old entry was dropped entirely"
+        assert "chars elided" in rendered
+        assert "earlier entries omitted" not in rendered
+
+    def test_the_whole_action_history_survives_a_small_budget(self) -> None:
+        """The behaviour this buys: with bodies squeezed instead of digested,
+        a small budget drops the oldest entries and the model forgets what it
+        did. With digests, every call is still named."""
+        builder = _builder(keep=1)
+        state = _state()
+        for i in range(40):
+            state.append_log(
+                LogEntry(
+                    index=0,
+                    kind="tool",
+                    tool=f"tool_{i}",
+                    arguments={"path": f"f{i}.py"},
+                    success=True,
+                    text="y" * 3_000,
+                )
+            )
+
+        rendered = builder._render_log(state, chars=6_000)
+        for i in range(40):
+            assert f"tool_{i}" in rendered, f"the record of tool_{i} was lost"
+
+    def test_a_non_tool_entry_falls_back_to_a_short_render(self) -> None:
+        """A note has no head line to keep, so it degrades to a truncated
+        render rather than a digest -- still bounded, just differently."""
+        entry = LogEntry(index=1, kind="note", text="z" * 5_000)
+        assert len(entry.digest()) < 500
+
+
+def _builder(*, keep: int) -> ContextBuilder:
+    spec = ModelSpec(provider="mock", model="mock-react")
+    settings = Settings(home=Path("/tmp/uaa-ctx-home"), workspace=Path("/tmp/uaa-ctx-ws"))
+    settings.agent = AgentConfig(keep_recent_observations=keep)
+    return ContextBuilder(
+        settings=settings, model=MockModel(spec), tool_catalog="", summarizer=None
+    )

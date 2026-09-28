@@ -133,18 +133,34 @@ class ContextBuilder:
         return messages
 
     def _render_log(self, state: AgentState, *, chars: int) -> str:
+        """Two tiers, and the cheap one comes first.
+
+        Recent entries are rendered in full -- they are what the model is
+        working from. Entries older than `keep_recent_observations` keep only
+        their head line: the tool, its arguments, whether it worked, and how
+        much came back.
+
+        That distinction is the whole point. Squeezing old entries to a
+        smaller *body* still spends the tokens, and when the budget runs out
+        the oldest entries are dropped outright -- so the model loses the
+        record of what it already did and re-runs calls whose results it
+        cannot see. A digest is a few dozen characters, so the entire action
+        history fits, and the fact the model actually needs ("I already read
+        app.py and it worked") survives at no cost.
+        """
         if not state.log:
             return ""
         header = "# Progress so far\n"
         budget = max(1_000, chars - len(header))
         keep = self.settings.agent.keep_recent_observations
 
-        # Recent entries get room; older ones are squeezed first.
         chunks: list[str] = []
         remaining = budget
         for i, entry in enumerate(reversed(state.log)):
-            allowance = max(400, int(budget * 0.7)) if i < keep else max(200, budget // 10)
-            rendered = entry.render(max_chars=allowance)
+            if i < keep:
+                rendered = entry.render(max_chars=max(400, int(budget * 0.7)))
+            else:
+                rendered = entry.digest()
             if len(rendered) > remaining:
                 rendered = rendered[: max(200, remaining)]
             remaining -= len(rendered)
@@ -160,6 +176,18 @@ class ContextBuilder:
 
     # -- compaction -------------------------------------------------------
     def should_compact(self, state: AgentState) -> bool:
+        """Whether to pay for the LLM summary.
+
+        This triggers on *state growth*, not on whether the prompt fits --
+        the render already guarantees the prompt fits, for free. What the
+        summary buys is a smaller durable state: the log is folded into
+        `compacted_summary` and dropped, so `replay` stays fast and the event
+        stream stays bounded over a long task.
+
+        Measuring the raw log is therefore correct here, even though the
+        rendered form is much smaller. Measuring the rendered form would mean
+        never compacting, and a state that grows without limit.
+        """
         keep = self.settings.agent.keep_recent_observations
         if len(state.log) <= keep:
             return False
