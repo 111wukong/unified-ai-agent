@@ -152,7 +152,6 @@ class AgentState(BaseModel):
     steps_used: int = 0
     model_calls: int = 0
     usage: TokenUsage = Field(default_factory=TokenUsage)
-    retry_count: int = 0
     pending_confirmation: PendingConfirmation | None = None
     # A call the user approved (or refused) while the task was paused. Kept
     # separately from `pending_confirmation` so that resume() can execute the

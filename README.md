@@ -601,6 +601,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 | `setattr` 不做校验 | pydantic 默认只在构造时校验。`config set sandbox.mode read-only` 存下的是裸字符串，类型悄悄不再是 `SandboxMode`——今天比较相等，第一次用 `is` 就崩 |
 | `list_skill_runs` 按毫秒时间戳排序 | 同一毫秒写入的两条记录顺序不定。**和任务列表那个缺陷一模一样**，说明「毫秒精度不够」是一条会复发的规律，不是一次性 bug |
 | `state.loaded_skills` 从不被写入 | 技能效果归因的唯一来源是空的，于是 `skill_runs` 即使接了线也只会记 0 条 |
+| `AgentState.retry_count` 从不被读、也从不被写 | 删除它。模型重试次数现在从 `MODEL_RETRY` 事件里数得出来，比维护一个可能漂移的计数器更可靠 |
 
 **这一批带走的经验：**
 
