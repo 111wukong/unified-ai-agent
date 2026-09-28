@@ -110,6 +110,28 @@ _NEVER_WRITE_EXCEPTIONS = [
 
 _METACHARS = re.compile(r"[;&|`$()<>{}!*?\[\]~\n\r\\]")
 
+#: Paths the agent may READ but never WRITE, even inside the workspace.
+#:
+#: These are not "sensitive data" -- reading a hook to see what the project
+#: runs is useful. They are *execution vectors*: writing one causes code to
+#: run later, outside the approval gate, usually after the agent is gone. The
+#: clearest case is a git hook -- write `.git/hooks/pre-commit` and the next
+#: `git commit`, by anyone, at any time, runs it with no confirmation.
+#:
+#: `.git/config` is the same shape through a different door: `core.hooksPath`
+#: redirects where hooks are loaded from, `core.pager` / `core.fsmonitor` /
+#: `credential.helper` name programs to execute, and `alias.*` injects
+#: commands. There is no safe subset to allow, so the file is the unit.
+#:
+#: Codex CLI reaches the same conclusion with "writable roots", pinning
+#: `.git/hooks` read-only for exactly this reason.
+_WRITE_PROTECTED_GLOBS = [
+    "**/.git/hooks/**",
+    "**/.git/config",
+    "**/.git/config.*",
+    "**/.git/modules/**/config",
+]
+
 
 def _under_any(path: Path, prefixes: list[str]) -> bool:
     text = str(path)
@@ -146,6 +168,17 @@ class PathGuard:
         self.read_roots = [self._resolve_root(r) for r in policy.fs.read_roots]
         self.write_roots = [self._resolve_root(r) for r in policy.fs.write_roots]
         self.extra_deny = list(policy.fs.extra_deny)
+        # The agent's own policy and audit log. Writing either is self-
+        # elevation: the config decides what the agent may do, and the
+        # database is the record of what it did. Normally both sit outside
+        # the workspace and the fence already covers them -- but a workspace
+        # set to the home directory would put them inside it, and "the agent
+        # can rewrite its own permissions" is not a configuration anyone
+        # intends.
+        self.write_protected_abs = [
+            self.home / "config.toml",
+            self.home / "uaa.db",
+        ]
 
     def _resolve_root(self, raw: str) -> Path:
         p = Path(raw).expanduser()
@@ -189,8 +222,31 @@ class PathGuard:
             return Verdict(Decision.DENY, f"{path} is outside the readable roots ({roots})")
         return ALLOW
 
+    def is_write_protected(self, path: Path) -> str:
+        """Why this path may not be written, or "" if it may.
+
+        Separate from `is_sensitive` on purpose: these paths are fine to
+        *read*. Denying the read too would stop the agent from inspecting the
+        hooks a project runs, which is exactly the kind of thing it should
+        look at before changing anything.
+        """
+        text = str(path)
+        if any(text == p or str(path) == str(p) for p in self.write_protected_abs):
+            return (
+                f"{path} is this agent's own state (config or event log); "
+                "writing it would let the agent change its own policy or audit trail"
+            )
+        if any(fnmatch.fnmatch(text, g) for g in _WRITE_PROTECTED_GLOBS):
+            return (
+                f"{path} is an execution vector: it runs code later, outside "
+                "this approval gate. Edit it yourself if that is what you want."
+            )
+        return ""
+
     def check_write(self, raw: str, *, base: Path | None = None) -> Verdict:
         path = self.resolve(raw, base=base)
+        if protected := self.is_write_protected(path):
+            return Verdict(Decision.DENY, protected)
         if _under_any(path, _NEVER_WRITE_ABS) and not _under_any(
             path, _NEVER_WRITE_EXCEPTIONS
         ):

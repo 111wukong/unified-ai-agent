@@ -65,6 +65,14 @@ class ToolSpec(BaseModel):
     timeout_s: float | None = None
     source: str = "builtin"  # builtin | mcp:<server> | skill:<name>
     tags: list[str] = Field(default_factory=list)
+    #: Argument names whose values are files this tool will overwrite.
+    #:
+    #: Declared rather than inferred, so "which files can this tool damage"
+    #: is answerable from the tool's own definition. The runtime snapshots
+    #: each of these *before* execution, which is what makes a rewind
+    #: possible; a tool that writes files without declaring them here is a
+    #: tool whose changes cannot be undone.
+    snapshot_paths: list[str] = Field(default_factory=list)
 
     def as_openai_tool(self) -> dict[str, Any]:
         return {

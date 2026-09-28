@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import time
+from pathlib import Path
 from typing import Any
 
 from unified_agent.agent.state import AgentState, LogEntry
@@ -23,7 +25,7 @@ from unified_agent.config import Settings
 from unified_agent.errors import ConfirmationRequired, PermissionDenied, ToolError
 from unified_agent.observability.events import EventType
 from unified_agent.observability.redact import Redactor
-from unified_agent.tools.base import ToolContext, ValidationFailure
+from unified_agent.tools.base import Tool, ToolContext, ValidationFailure
 from unified_agent.tools.permissions import PermissionEngine
 from unified_agent.tools.registry import ToolRegistry
 from unified_agent.types import ToolCall, ToolResult, idempotency_key
@@ -34,6 +36,13 @@ FINISH_TOOL = "finish"
 # Not intercepted -- but the runtime does observe it, to record which skills
 # a task used (see `AgentRuntime._note_skill_loaded`).
 SKILL_TOOL = "load_skill"
+
+#: Ceiling on a pre-image. A checkpoint is only useful if it can be written
+#: back, and restoring a 500 MB file is not something a rewind should attempt
+#: without being asked. Over the limit the checkpoint is recorded as
+#: unrestorable *with the reason*, rather than silently skipped -- "this file
+#: cannot be rewound" is a fact the user needs before they need it.
+_MAX_SNAPSHOT_BYTES = 1_000_000
 
 
 class ToolRunner:
@@ -141,6 +150,9 @@ class ToolRunner:
             },
         )
 
+        # 4b. write-ahead file checkpoints, before the tool touches anything
+        self._checkpoint(tool, args, ctx, state, call_id)
+
         # 5. execute
         started = time.monotonic()
         timeout = tool.spec.timeout_s or self.settings.permissions.shell.default_timeout_s
@@ -238,6 +250,76 @@ class ToolRunner:
         return entry
 
     # -- helpers ----------------------------------------------------------
+    def _checkpoint(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        ctx: ToolContext,
+        state: AgentState,
+        call_id: str,
+    ) -> None:
+        """Capture pre-images of every file this tool is about to overwrite.
+
+        Taken *before* execution, for the same reason the tool ledger is
+        write-ahead: if the process dies mid-write, the copy taken beforehand
+        is the only one left. Without this the runtime can replay its own
+        state perfectly and still leave a broken working tree behind -- it
+        knows exactly which step broke the file and cannot put the file back.
+
+        A file that does not exist yet is a checkpoint too, of "absent":
+        rewinding means deleting it, and that is a fact worth recording
+        rather than inferring.
+        """
+        for arg_name in tool.spec.snapshot_paths:
+            raw = args.get(arg_name)
+            if not isinstance(raw, str) or not raw:
+                continue
+            path = Path(raw)
+            if not path.is_absolute():
+                path = ctx.workspace / path
+            path = Path(os.path.realpath(path))
+
+            record: dict[str, Any] = {
+                "call_id": call_id,
+                "path": str(path),
+                "existed": path.is_file(),
+                "artifact": None,
+                "bytes": 0,
+                "restorable": True,
+                "reason": "",
+            }
+            if record["existed"]:
+                try:
+                    content = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    record["restorable"] = False
+                    record["reason"] = (
+                        f"the original could not be read ({type(exc).__name__}), "
+                        "so it cannot be restored"
+                    )
+                else:
+                    record["bytes"] = len(content)
+                    if len(content) > _MAX_SNAPSHOT_BYTES:
+                        record["restorable"] = False
+                        record["reason"] = (
+                            f"the original is {len(content)} bytes, over the "
+                            f"{_MAX_SNAPSHOT_BYTES}-byte snapshot limit"
+                        )
+                    else:
+                        record["artifact"] = self.store.save_artifact(
+                            task_id=state.task_id,
+                            tool_call_id=call_id,
+                            content=content,
+                            artifact_dir=self.settings.artifact_dir,
+                            sha256=hashlib.sha256(content.encode("utf-8")).hexdigest()[:16],
+                            suffix="snapshot",
+                            # Verbatim: a checkpoint exists to be written back
+                            # byte-for-byte, and a redacted one restores a
+                            # corrupted file.
+                            redact=False,
+                        )
+            self.store.append(state.task_id, EventType.FILE_CHECKPOINT, record)
+
     def _fail(
         self,
         state: AgentState,

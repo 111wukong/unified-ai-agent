@@ -40,6 +40,14 @@ class EventType(str, Enum):
     TOOL_FAILED = "tool_failed"
     TOOL_REPLAYED = "tool_replayed"
     TOOL_AMBIGUOUS = "tool_ambiguous"
+    #: A pre-image of a file, captured *before* a write tool touches it.
+    #:
+    #: Recorded before execution, not after, for the same reason the tool
+    #: ledger is write-ahead: if the process dies mid-write, the only copy of
+    #: the original is the one taken beforehand. This is what makes
+    #: `uaa task rewind` possible -- without it the runtime can replay
+    #: *state*, but it cannot put a file back.
+    FILE_CHECKPOINT = "file_checkpoint"
 
     # human in the loop
     CONFIRMATION_REQUESTED = "confirmation_requested"

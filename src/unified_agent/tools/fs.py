@@ -145,6 +145,7 @@ class WriteFileTool(Tool):
             "additionalProperties": False,
         },
         effect_class=EffectClass.WRITE_LOCAL,
+        snapshot_paths=["path"],
     )
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -204,6 +205,7 @@ class ApplyPatchTool(Tool):
             "additionalProperties": False,
         },
         effect_class=EffectClass.WRITE_LOCAL,
+        snapshot_paths=["path"],
     )
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:

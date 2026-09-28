@@ -205,3 +205,91 @@ class TestEngineDecisions:
         assert engine.check_url("https://docs.python.org/3/").allowed
         assert engine.check_url("https://evil.example.com/x").denied
         assert engine.check_url("file:///etc/passwd").denied
+
+
+class TestExecutionVectorsAreNotWritable:
+    """Writing a file that runs code later is code execution with extra steps.
+
+    The agent has no shell metacharacters and every command goes through the
+    allowlist -- and then it writes `.git/hooks/pre-commit`, and the next
+    `git commit` (by anyone, at any time, after the agent is gone) runs
+    whatever it wrote. The approval gate was never involved.
+    """
+
+    def test_a_git_hook_cannot_be_written(self, guard: PathGuard) -> None:
+        verdict = guard.check_write(".git/hooks/pre-commit")
+        assert verdict.denied
+        assert "execution vector" in verdict.reason
+
+    def test_a_git_hook_can_still_be_read(self, guard: PathGuard) -> None:
+        """Reading is how the agent finds out what the project runs. Denying
+        it would remove information and add no safety."""
+        assert guard.is_write_protected(guard.resolve(".git/hooks/pre-commit"))
+        assert not guard.is_sensitive(guard.resolve(".git/hooks/pre-commit"))
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            ".git/config",
+            ".git/config.worktree",
+            ".git/modules/sub/config",
+            "sub/.git/hooks/post-merge",
+        ],
+    )
+    def test_the_other_doors_are_shut_too(self, guard: PathGuard, target: str) -> None:
+        """`.git/config` runs code through `core.hooksPath`, `core.pager`,
+        `credential.helper` and `alias.*`. There is no safe subset."""
+        assert guard.check_write(target).denied
+
+    def test_the_agents_own_policy_and_audit_log_are_protected(
+        self, tmp_path: Path
+    ) -> None:
+        """Normally these sit outside the workspace and the fence covers
+        them. A workspace set to the home directory would put them inside it,
+        and "the agent rewrites its own permissions" is not a configuration
+        anyone intends."""
+        home = tmp_path / "home"
+        home.mkdir()
+        guard = PathGuard(
+            workspace=home,  # the workspace IS the home directory
+            home=home,
+            policy=PermissionConfig(),
+        )
+        assert guard.check_write("config.toml").denied
+        assert guard.check_write("uaa.db").denied
+        assert "own state" in guard.check_write("config.toml").reason
+        # Anything else in there is an ordinary file.
+        assert not guard.check_write("notes.md").denied
+
+    def test_a_normal_source_file_is_unaffected(self, guard: PathGuard) -> None:
+        assert not guard.check_write("src/app.py").denied
+        assert not guard.check_write("README.md").denied
+        assert not guard.check_write(".gitignore").denied
+
+    def test_the_engine_refuses_it_before_any_approval_can_override(
+        self, tmp_path: Path, settings  # noqa: ANN001
+    ) -> None:
+        """`--yes` pre-approves every effect class. It must not pre-approve
+        this: the fence is checked first, and a deny there is absolute."""
+        ws = tmp_path / "engine-ws"
+        ws.mkdir()
+        engine = PermissionEngine(
+            PermissionConfig(),
+            workspace=ws,
+            home=tmp_path / "home",
+            cli_approvals=tuple(EffectClass),
+        )
+        registry = ToolRegistry()
+        for tool in FS_TOOLS:
+            registry.register(tool)
+
+        write_file = registry.get("write_file")
+        verdict = engine.decide(
+            write_file, {"path": ".git/hooks/pre-commit", "content": "#!/bin/sh\nrm -rf /\n"}
+        )
+        assert verdict.denied, "a pre-approved effect class must not unlock an execution vector"
+
+        apply_patch = registry.get("apply_patch")
+        assert engine.decide(
+            apply_patch, {"path": ".git/config", "edits": [{"old": "a", "new": "b"}]}
+        ).denied

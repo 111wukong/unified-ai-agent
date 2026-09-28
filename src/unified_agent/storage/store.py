@@ -447,12 +447,22 @@ class Store:
         artifact_dir: Path,
         sha256: str,
         suffix: str = "txt",
+        redact: bool = True,
     ) -> str:
+        """Persist a blob. `redact=False` only for file checkpoints.
+
+        Everything else goes through the redactor on the way in -- an
+        offloaded tool output is still a log line. A checkpoint is the
+        exception, and it has to be: it exists to be written back to disk
+        byte-for-byte, so redacting it produces a *corrupted* restore. The
+        content is a copy of a file that is already in the workspace, so it
+        is in the same trust domain either way; the artifact directory is not
+        a new exposure.
+        """
         artifact_dir.mkdir(parents=True, exist_ok=True)
         aid = new_id("art")
         path = artifact_dir / f"{aid}.{suffix}"
-        # Redact on the way in. An offloaded tool output is still a log line.
-        path.write_text(self.redactor(content), encoding="utf-8")
+        path.write_text(self.redactor(content) if redact else content, encoding="utf-8")
         with self._lock:
             self.conn.execute(
                 "INSERT INTO artifacts(id,task_id,tool_call_id,path,bytes,sha256,created_at)"

@@ -778,6 +778,52 @@ def task_events(
         console.print(f"[dim]{event.seq:>4}[/dim]  {escape(event.summary())}")
 
 
+@task_app.command("rewind")
+def task_rewind(
+    task_id: str,
+    apply: bool = typer.Option(
+        False, "--apply", help="Actually restore. Without this it is a preview."
+    ),
+    from_seq: int = typer.Option(
+        0, "--from-seq", help="Only undo writes at or after this event sequence number."
+    ),
+    home: Optional[Path] = typer.Option(None, "--home"),
+) -> None:
+    """Undo a task's file changes, from its checkpoints.
+
+    Previews by default. Restoring files is destructive in the one way that
+    matters -- it can overwrite work done after the agent's -- so the
+    destructive action has to be asked for explicitly rather than being the
+    default of a command someone types to see what happened.
+    """
+    from unified_agent.agent.rewind import apply_rewind, plan_rewind
+
+    settings = _settings(home, None)
+    store = _read_store(settings)
+    try:
+        plan = plan_rewind(store, task_id, from_seq=from_seq)
+    finally:
+        store.close()
+
+    console.print(plan.render(), markup=False)
+    if not apply:
+        if plan.actionable:
+            console.print()
+            console.print(
+                f"[dim]preview only. Re-run with [cyan]--apply[/cyan] to "
+                f"rewrite {len(plan.actionable)} file(s).[/dim]"
+            )
+        return
+    if not plan.actionable:
+        return
+    for line in apply_rewind(plan):
+        console.print(f"[green]{escape(line)}[/green]")
+    if plan.blocked:
+        err_console.print(
+            f"{len(plan.blocked)} file(s) were left untouched; see the list above."
+        )
+
+
 @task_app.command("resume")
 def task_resume(
     task_id: str,
