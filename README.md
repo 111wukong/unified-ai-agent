@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-535%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-605%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -13,6 +13,8 @@ uaa run --model mock "查看当前目录下的 Python 文件并总结"   # 离�
 uaa run "分析认证模块并补充测试"                            # 用真实模型
 uaa run --multi-agent "对比这五个模块的设计取舍"            # 显式开启子 Agent 扇出
 uaa serve                                                   # HTTP + WebSocket + Web 控制台
+uaa a2a card                                                # 会发布的 Agent Card
+uaa a2a call https://partner.example.com "summarise this"    # 调另一个 Agent（默认不允许）
 uaa desktop                                                 # 原生桌面窗口
 uaa desktop --bundle                                        # 打成可双击的 .app
 uaa sandbox                                                 # 报告进程隔离实际是否生效
@@ -198,6 +200,7 @@ CLI (typer + rich)
         ├── Reflector                  任务结束后一次：记忆 + 技能候选
         ├── MultiAgentRunner           子 Agent = 带 parent_task_id 的普通任务
         └── PermissionEngine           路径围栏 / 命令守卫 / 域名白名单 / 环境脱敏
+              ├── A2AServer             远端任务 = 普通任务 + session metadata 记归属
               ├── ToolRegistry         builtin + skills + MCP + delegate
               ├── SkillRegistry        SKILL.md 规范 + 安全审查 + 持久化状态阶梯
               ├── ModelRegistry        能力矩阵 + 适配器
@@ -237,6 +240,12 @@ src/unified_agent/
 │   ├── expressions.py  `{{#node.field#}}` 解析与条件求值
 │   ├── runner.py       执行器：工作流运行本身是一个 task
 │   └── multi_agent.py  编排者-工作者：契约、并发上限、子 Agent 预算、报告落盘
+├── a2a/                Agent 间通信（v1.0：Card + JSON-RPC + SSE）
+│   ├── types.py        5 个核心对象 + 8 个任务状态（含状态映射）
+│   ├── card.py         发布什么：只广告 active 技能，能力声明可校验
+│   ├── security.py     SSRF 防线（scheme → allowlist → 解析地址必须公网）+ 不可信卡片审查
+│   ├── server.py       JSON-RPC：message/send · message/stream · tasks/get · tasks/cancel
+│   └── client.py       调远端：逐跳复检重定向，卡片自己的 url 也过检查
 ├── memory/
 │   ├── embeddings.py   向量提供方：OpenAI 兼容 / 离线哈希 / 无
 │   ├── vector.py       cosine 检索，sqlite-vec 加速、纯 Python 兜底
@@ -422,7 +431,49 @@ uaa config set multi_agent.model gpt-4.1-mini # 子 Agent 用便宜模型
 
 ---
 
-## 桌面端：系统 webview，不是 Electron
+## A2A：跨边界，不是自造协议
+
+```bash
+uaa config set a2a.enabled true                  # 发布自己
+uaa config set a2a.allow_hosts partner.example.com  # 才允许调用别人
+uaa a2a card                                     # 打印会发布的 Agent Card
+uaa a2a check https://partner.example.com        # 先审对方的卡片，再决定要不要调
+uaa a2a call https://partner.example.com "summarise this repo"
+```
+
+实现的是 [A2A v1.0](https://a2a-protocol.org) 的 JSON-RPC 绑定 + Agent Card + SSE 流式。**不自造 `AgentMessage`**（原规格 §13.4 想自造，作废）。
+
+理由是一句话：**MCP 是 Agent 触达自己的工具，A2A 是 Agent 跨边界触达另一个 Agent。** 而边界正是自造协议必须重新推导认证、流式、取消、任务身份的地方——然后弄错其中一个。
+
+### 最大的收益是一个**已有的状态有了标准名字**
+
+```
+SUBMITTED → WORKING → INPUT_REQUIRED / AUTH_REQUIRED
+                    → COMPLETED / FAILED / CANCELED / REJECTED
+```
+
+本项目的 `waiting_confirmation` **正好就是 `INPUT_REQUIRED`**。也就是说，一次「等人工审批」的暂停可以直接表达给另一个组织，不需要为它发明字段——而且对方的状态机不用懂我们的内部词表。
+
+内部 7 个状态到线上 8 个的映射是显式表，不是命名约定：`pending → SUBMITTED`、`planning/running → WORKING`、`waiting_confirmation → INPUT_REQUIRED`。未知状态映射为 `FAILED`——对端更需要「这次没成功」，而不是一个它解析不了的内部字符串或 500。
+
+### 规范点名的风险，落地了哪几个
+
+| 风险 | 本项目的做法 |
+|---|---|
+| **Webhook SSRF** | 不发 webhook（卡片里 `pushNotifications: false`）。但**抓取远端 Agent Card 是同一种形状**——URL 由调用方给，响应进我们的进程。同一道防线：scheme 白名单 → host allowlist → **解析后的地址必须是公网** |
+| **Card 篡改 / 上下文投毒** | 远端卡片是**不可信输入**：先按 schema 校验，再把 `name` / `description` / 每个 skill 的描述跑一遍**技能安全审查那套 prompt-injection 检测器**。命中是**警告不是拒绝**——按散文拒绝会让这条线变成对任何措辞碰巧命中模式的同伴的拒绝服务 |
+| Agent 冒充（Signed Cards / JWS） | **未实现**，明确写在下面的安全边界里，而不是假装没有 |
+| 重放（nonce + 时间戳） | **未实现**，同上 |
+
+三条实现上的选择：
+
+- **有效的卡片不等于可信的卡片。** schema 校验说的是形状对，不是主机可达。所以卡片自己的 `url` 也要过 SSRF 检查，不能因为卡片解析通过就信任它。重定向**逐跳复检**——透明跟随重定向就是让白名单里的主机变成内网的代理。
+- **`file` part 是拒绝，不是丢弃。** 发一个文件、拿回一个看起来正常的答案，对端会以为文件被读了。所以拒绝时要指明是哪个 part。
+- **Agent Card 也在 token 守卫后面。** 这是对 A2A 公开发现约定的**刻意偏离**：卡片会列出本机配了哪些技能，而这是个本地优先的工具，整个面都在 loopback + token 之后。代价是对端必须被配置凭据而不是发现凭据——方向上更安全，而卡片自己会广告它需要的方案。
+
+**每个远端任务都是普通任务**：走同一个 `AgentRuntime.run`，所以预算、权限、事件流、审批闸门、恢复全部适用。`contextId` 就是 session id，同一个 context 里的多次调用共享记忆与历史。唯一新增的是**归属**：session 的 metadata 记下对端是谁，否则审计日志里会出现没人能追溯到对方的活儿。
+
+---
 
 ```bash
 pip install -e ".[desktop]"     # 只多一个依赖：pywebview
@@ -433,6 +484,8 @@ uaa desktop --bundle             # ~/Applications/UnifiedAgent.app，可双击
 > **如果 `pip install` 报 `EEXIST: mkdir .../pip-install-*/...`**，用 `uv` 装：
 > `uv pip install --python .venv/bin/python "pywebview>=5.0"`。
 > 这是 pip 在某些受限环境下创建临时目录失败，uv 走的是另一套机制。
+
+## 桌面端：系统 webview，不是 Electron
 
 窗口是**操作系统自己的 webview**（macOS 上 WKWebView）套在**同一个服务、同一个控制台**外面。没有第二套 UI，没有第二套构建系统，没有捆绑 Chromium。
 
@@ -519,6 +572,15 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 - `run_command` 永远 `shell=False`，参数经 `shlex.split` 后作为 argv 执行。
 - `http_get`/`http_post` 的重定向**逐跳**复检白名单 —— 一个被允许的主机 302 到 `evil.example` 不会被静默跟随。
 - 沙箱：第一版用「路径围栏 + 命令白名单 + 环境脱敏」，**没有** Docker。Docker 每条命令 3 秒起的开销不值得，第二版做成可插拔。
+- **A2A 出站请求三重防线**：scheme 必须是 http/https → host 必须在 `a2a.allow_hosts`（默认空 = 谁也不调）→ **解析后的地址必须是公网**（`127.0.0.1` / `169.254.169.254` / `10.x` / `::1` 全拦）。第三条是经典的绕过，也是最常被跳过的检查。重定向逐跳复检，**卡片自己的 `url` 也要过检查**——有效的卡片不等于可信的卡片。
+- **远端 Agent Card 按不可信输入处理**：schema 校验 + 复用技能安全审查的 prompt-injection 检测器扫 `name`/`description`/每个 skill 的描述。
+
+**A2A 明确没做的两件事**（规范点名，但属于部署关注点而不是库的事）：
+
+- **Signed Agent Cards（JWS）**：不验证签名，因此无法证明卡片确实由声称的签发方发布。要用在生产环境，需要一层会校验 JWS 并固定可信签发方的网关。
+- **重放防护（nonce + 短生命周期 token）**：服务端依赖 HTTP 层的 bearer token，没有 per-request nonce 或时间戳校验。
+
+两件事都没有「部分实现」——宁可整项缺失并写明，也不要一个看起来生效的半成品。
 
 ---
 
@@ -530,21 +592,21 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 |---|---|
 | Phase 2 | ✅ FastAPI + SSE/WebSocket（AG-UI）、✅ 沙箱（Seatbelt / Docker） |
 | Phase 3 | ✅ 向量记忆与矛盾处理、✅ 技能审核流程（候选可见 + 状态持久化 + CLI/API 推进） |
-| Phase 4 | ✅ YAML 工作流、✅ 多 Agent（orchestrator-worker）、⏸ A2A v1.0 |
+| Phase 4 | ✅ YAML 工作流、✅ 多 Agent（orchestrator-worker）、✅ A2A v1.0（Card + JSON-RPC + SSE） |
 | Phase 5 | ✅ Web 控制台（零构建）、⏸ TypeScript SDK、⏸ 渠道适配器 |
 
 调研与采纳决策见 [`docs/phase2-5-research.md`](docs/phase2-5-research.md)。
 
 多 Agent **默认关闭**：token 消耗约 15×，而且调研明确说编程任务不适合它。做成「显式开启 + 预算闸门 + 角色可配」，理由和实测数字见上面的多 Agent 一节。
 
-跨框架 Agent 通信**不自造协议**，等下一阶段直接实现 A2A（Linux Foundation 标准，150+ 支持者）。
+A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿的端点是个决定，调用别人也是。而且调用方向的核心防线是 `a2a.allow_hosts` 为空即「谁也不调」。
 
 ---
 
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 535 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 605 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -602,6 +664,19 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 | `list_skill_runs` 按毫秒时间戳排序 | 同一毫秒写入的两条记录顺序不定。**和任务列表那个缺陷一模一样**，说明「毫秒精度不够」是一条会复发的规律，不是一次性 bug |
 | `state.loaded_skills` 从不被写入 | 技能效果归因的唯一来源是空的，于是 `skill_runs` 即使接了线也只会记 0 条 |
 | `AgentState.retry_count` 从不被读、也从不被写 | 删除它。模型重试次数现在从 `MODEL_RETRY` 事件里数得出来，比维护一个可能漂移的计数器更可靠 |
+| **`ModelCapabilities.parallel_tool_calls` / `max_output_tokens`** | 三个适配器都声明了，零处读取。`max_output_tokens` 还和 `ModelSpec` 的同名字段重复——两处设置同一个值，其中一处被忽略 |
+| **`ModelCapabilities.vision`** | 没有任何代码读它，而运行时**无法在消息里放图片**。这个标志只能误导 |
+| **`Store.find_resumable`** | 读投影的定点查询，而 `resume` 必须从事件折叠判断——「这个任务能不能恢复」的第二个、更陈旧的答案 |
+| **`SkillRegistry.allowed_tools_for`** | 一个「按技能声明自动授予工具」的脚手架，而本项目**刻意不做**这件事：权限引擎是唯一权威 |
+| **`db.connect(read_only=True)` 实现正确、无人调用** | 一个没人用过的模式等于没验证过的模式。而所有只读命令都在开可写连接——**能写的读路径就是 bug 会毁库的读路径** |
+| `sessions.metadata` 参数存在、无人读 | 直到 A2A 需要它才接线：远端任务必须记得对端是谁 |
+| `config set` 拒绝一切列表 | `a2a.allow_hosts`、`permissions.network.allow_domains`、`multi_agent.allowed_effects` 都是文档里的设置，却只能手改 TOML——**前两个是安全设置**，最不该让人找不到 |
+
+**这一批带走的经验（续）：**
+
+4. **审计脚本自己会有它要找的那类 bug。** 第一版 `public_methods` 排除了整个声明文件，于是「类内部自己调用的方法」全被误报——11 个假阳性盖住 15 个真问题。规则改成「总出现次数减去声明本身」之后信号才干净。**用工具得出的结论，先怀疑工具。**
+5. **「能跑的」和「验证过的」不是一回事。** `read_only=True` 实现是对的，但从未被任何调用点走过——等于一段没人验证过的代码。接线之后才有测试证明它真的挡得住写。
+6. **列表设置必须能从 CLI 设。** 拒绝一切列表的代价是把几个安全设置变成只有手改 TOML 才可达。标量列表用逗号分隔就够了，`mcp_servers` 那种「表的列表」才该留在文件里。
 
 **这一批带走的经验：**
 

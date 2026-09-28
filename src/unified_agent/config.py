@@ -17,7 +17,7 @@ import os
 import tomllib
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Sequence, get_args, get_origin
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 
@@ -309,6 +309,38 @@ class MultiAgentConfig(BaseModel):
     max_summary_chars: int = 1_200
 
 
+class A2AConfig(BaseModel):
+    """Agent-to-agent exposure.
+
+    Off by default. Serving an endpoint that accepts work from other agents
+    is a decision, and so is calling one -- both directions are opt-in.
+
+    `allow_hosts` is empty by default, which means "call nobody". Fetching a
+    remote Agent Card is an outbound request to a URL a peer supplies, so it
+    is the same SSRF shape the A2A spec names for webhooks, and an allowlist
+    is the only form of it worth enabling.
+    """
+
+    enabled: bool = False
+    name: str = "unified-ai-agent"
+    #: Where this agent says it lives, for the Agent Card's `url`. Empty
+    #: means "derive from the request", which is wrong behind a proxy: the
+    #: card would advertise an internal address a peer cannot reach.
+    public_url: str = ""
+    description: str = (
+        "A local-first agent runtime: event-sourced task execution, enforced "
+        "budgets, write-ahead tool ledger and a human approval gate."
+    )
+    # Hosts a remote agent may be reached at, e.g. ["partner.example.com"].
+    allow_hosts: list[str] = Field(default_factory=list)
+    # Escape hatch for a lab setup. Named so that turning it on is obviously
+    # a decision: it disables the private-address block entirely.
+    allow_private_networks: bool = False
+    timeout_s: float = 30.0
+    # How much of a remote agent's answer to accept, in bytes.
+    max_response_bytes: int = 1_000_000
+
+
 class MemoryConfig(BaseModel):
     """Long-term memory.
 
@@ -357,6 +389,7 @@ class Settings(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
+    a2a: A2AConfig = Field(default_factory=A2AConfig)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
     skill_dirs: list[str] = Field(default_factory=lambda: ["skills"])
 
@@ -712,11 +745,7 @@ class ConfigEditor:
             return self._set_model_field(parts[1], parts[2], value)
 
         container, field = self._walk(parts, dotted_key)
-        _refuse_if_structured(
-            dotted_key, getattr(container, field), config_file=self.config_file
-        )
-        setattr(container, field, _coerce_field(container, field, value, dotted_key))
-        return value
+        return _assign(container, field, value, dotted_key, self.config_file)
 
     def _set_model_field(self, alias: str, field: str, value: Any) -> Any:
         if alias not in self.settings.models:
@@ -724,11 +753,7 @@ class ConfigEditor:
         if field not in ModelSpec.model_fields:
             raise ConfigError(f"unknown model field {field!r}")
         spec = self.settings.models[alias]
-        _refuse_if_structured(
-            f"models.{alias}.{field}", getattr(spec, field), config_file=self.config_file
-        )
-        setattr(spec, field, _coerce_field(spec, field, value, f"models.{alias}.{field}"))
-        return value
+        return _assign(spec, field, value, f"models.{alias}.{field}", self.config_file)
 
     def _walk(self, parts: list[str], dotted_key: str) -> tuple[Any, str]:
         """Resolve a dotted path to (the object holding the field, field name).
@@ -767,46 +792,84 @@ class ConfigEditor:
         return self.config_file
 
 
-def _coerce_field(container: BaseModel, field: str, value: Any, dotted_key: str) -> Any:
-    """Validate one field against its annotation, in isolation.
+def _assign(
+    container: BaseModel, field: str, value: Any, dotted_key: str, config_file: Path
+) -> Any:
+    """Validate one field and set it, refusing shapes a CLI cannot express.
 
-    `setattr` does not validate: pydantic only validates on construction
-    unless `validate_assignment` is on. Without this, `config set
-    sandbox.mode read-only` stores the raw string and the field's type
-    silently stops being `SandboxMode` -- the value compares equal today and
-    breaks the first time something does `is` or `model_dump(mode="json")`.
+    Two things this fixes over a bare `setattr`:
 
-    A single `TypeAdapter` rather than re-validating the whole model: the
-    rest of the object came from a file that already passed validation, and
-    rebuilding it to check one field would also re-run every validator.
+    * **`setattr` does not validate.** Pydantic only validates on construction
+      unless `validate_assignment` is on, so `config set sandbox.mode
+      read-only` used to store the raw string and the field's type silently
+      stopped being `SandboxMode` -- equal today, broken the first time
+      something uses `is` or `model_dump(mode="json")`.
+    * **A list of scalars is expressible; a list of tables is not.** Several
+      documented settings are lists (`a2a.allow_hosts`,
+      `permissions.network.allow_domains`, `multi_agent.allowed_effects`), and
+      refusing all lists made every one of them reachable only by editing
+      TOML by hand. A comma-separated value covers them; `mcp_servers` stays
+      hand-edited because each entry is a table.
     """
-    adapter = TypeAdapter(type(container).model_fields[field].annotation)
-    try:
-        return adapter.validate_python(value)
-    except ValidationError as exc:
-        detail = exc.errors()[0]
-        raise ConfigError(
-            f"{dotted_key}: {detail.get('msg', 'invalid value')} "
-            f"(got {value!r})"
-        ) from exc
+    annotation = type(container).model_fields[field].annotation
+    current = getattr(container, field)
 
-
-def _refuse_if_structured(dotted_key: str, current: Any, *, config_file: Path) -> None:
-    """Refuse to assign a scalar to a table, a list or a mapping.
-
-    `_coerce` turns "true" into a bool and "3" into an int; assigning either
-    to a nested table raises a pydantic `ValidationError`, which reaches the
-    user as a traceback instead of a sentence telling them what to type.
-    """
     if isinstance(current, BaseModel):
         raise ConfigError(
             f"{dotted_key!r} is a nested table; set one of its fields instead, "
             f"e.g. {dotted_key}.<field>"
         )
-    if isinstance(current, (list, dict)):
+    if isinstance(current, dict):
         raise ConfigError(
-            f"{dotted_key!r} is a {type(current).__name__}; edit {config_file} directly"
+            f"{dotted_key!r} is a mapping; edit {config_file} directly"
         )
+    if _is_model_list(annotation):
+        raise ConfigError(
+            f"{dotted_key!r} is a list of tables; edit {config_file} directly"
+        )
+    if _is_scalar_list(annotation):
+        # `_coerce` maps "" and "none" to None, which is how a scalar field is
+        # unset. For a list, "unset" is the empty list -- otherwise clearing
+        # an allowlist would be the one operation the CLI refuses.
+        if value is None:
+            value = []
+        elif isinstance(value, str):
+            value = [item.strip() for item in value.split(",") if item.strip()]
+
+    adapter = TypeAdapter(annotation)
+    try:
+        coerced = adapter.validate_python(value)
+    except ValidationError as exc:
+        detail = exc.errors()[0]
+        raise ConfigError(
+            f"{dotted_key}: {detail.get('msg', 'invalid value')} (got {value!r})"
+        ) from exc
+    setattr(container, field, coerced)
+    return coerced
+
+
+def _is_scalar_list(annotation: Any) -> bool:
+    """`list[str]`, `list[EffectClass]` and friends -- settable from a CSV."""
+    origin = get_origin(annotation)
+    if origin not in (list, Sequence):
+        return False
+    args = get_args(annotation)
+    if not args:
+        return False
+    return all(
+        isinstance(arg, type) and not issubclass(arg, BaseModel) for arg in args
+    )
+
+
+def _is_model_list(annotation: Any) -> bool:
+    """`list[McpServerConfig]` -- each entry is a table, so hand-edit."""
+    origin = get_origin(annotation)
+    if origin not in (list, Sequence):
+        return False
+    args = get_args(annotation)
+    return bool(args) and all(
+        isinstance(arg, type) and issubclass(arg, BaseModel) for arg in args
+    )
 
 
 def _coerce(raw: str) -> Any:

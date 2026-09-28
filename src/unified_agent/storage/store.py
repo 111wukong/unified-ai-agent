@@ -127,15 +127,32 @@ class Store:
         row = self.conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
         return dict(row) if row else None
 
-    def ensure_session(self, *, name: str, working_dir: str, model_alias: str) -> str:
-        """Reuse the session for a given (working_dir, name) pair if it exists."""
+    def ensure_session(
+        self,
+        *,
+        name: str,
+        working_dir: str,
+        model_alias: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Reuse the session for a given (working_dir, name) pair if it exists.
+
+        `metadata` is only applied when the session is created: overwriting it
+        on reuse would let the most recent caller silently rewrite the
+        provenance of everything already in the session.
+        """
         row = self.conn.execute(
             "SELECT id FROM sessions WHERE name=? AND working_dir=? ORDER BY created_at DESC LIMIT 1",
             (name, working_dir),
         ).fetchone()
         if row:
             return row["id"]
-        return self.create_session(name=name, working_dir=working_dir, model_alias=model_alias)
+        return self.create_session(
+            name=name,
+            working_dir=working_dir,
+            model_alias=model_alias,
+            metadata=metadata,
+        )
 
     def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.conn.execute(

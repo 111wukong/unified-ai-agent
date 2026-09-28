@@ -49,10 +49,12 @@ workflow_app = typer.Typer(
 app.add_typer(workflow_app, name="workflow")
 
 skill_app = typer.Typer(help="Inspect and validate skills.", no_args_is_help=True)
+a2a_app = typer.Typer(help="Agent-to-agent: publish this agent, call another.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
 app.add_typer(task_app, name="task")
 app.add_typer(memory_app, name="memory")
 app.add_typer(skill_app, name="skill")
+app.add_typer(a2a_app, name="a2a")
 
 console = Console()
 err_console = Console(stderr=True, style="bold red")
@@ -1351,6 +1353,111 @@ def skill_show(
     # Skill bodies are Markdown with [links](url) -- markup=False keeps them.
     console.print(f"[dim]status: {skill.status}[/dim]")
     console.print(skill.render(), markup=False)
+
+
+# ---------------------------------------------------------------------------
+# a2a
+# ---------------------------------------------------------------------------
+
+
+@a2a_app.command("card")
+def a2a_card(
+    url: Optional[str] = typer.Option(
+        None, "--url", help="The address peers should use. Defaults to a local placeholder."
+    ),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Print the Agent Card this agent would publish."""
+    settings = _settings(home, workspace)
+    settings.a2a.enabled = True  # building the card is not the same as serving it
+
+    async def _run() -> None:
+        from unified_agent.a2a import A2AServer, describe_capability_gap
+
+        agent = await build_agent(settings=settings, connect_mcp=False)
+        try:
+            server = A2AServer(agent)
+            card = server.card(url=(url or settings.a2a.public_url or "http://127.0.0.1:8765") + "/a2a")
+            console.print_json(card.model_dump_json())
+            for gap in describe_capability_gap(card):
+                err_console.print(f"[yellow]card claims something this build does not do: {gap}[/yellow]")
+        finally:
+            agent.close()
+
+    asyncio.run(_run())
+
+
+@a2a_app.command("check")
+def a2a_check(
+    url: str = typer.Argument(..., help="Base URL of the remote agent."),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Fetch and vet a remote Agent Card without calling the agent.
+
+    Worth doing before a call: the card is untrusted input, and this prints
+    what the security review thought of it.
+    """
+    settings = _settings(home, workspace)
+
+    async def _run() -> int:
+        from unified_agent.a2a import A2AClient, A2AClientError
+
+        client = A2AClient(settings)
+        try:
+            card, report = await client.fetch_card(url)
+        except (A2AClientError, Exception) as exc:  # noqa: BLE001
+            err_console.print(escape(str(exc)))
+            return 1
+        console.print(f"[bold]{card.name}[/bold]  [dim]{card.url}[/dim]")
+        console.print(escape(card.description), markup=False)
+        console.print(f"[dim]protocol {card.protocolVersion} · {len(card.skills)} skill(s)[/dim]")
+        for skill in card.skills:
+            console.print(f"  [bold]{skill.id}[/bold] [dim]{escape(skill.description[:100])}[/dim]")
+        console.print(report.render(), markup=False)
+        return 0 if report.ok else 1
+
+    raise typer.Exit(asyncio.run(_run()))
+
+
+@a2a_app.command("call")
+def a2a_call(
+    url: str = typer.Argument(..., help="Base URL of the remote agent."),
+    message: str = typer.Argument(..., help="What to ask it."),
+    context: Optional[str] = typer.Option(None, "--context", help="Group related calls."),
+    as_json: bool = typer.Option(False, "--json"),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Call a remote agent.
+
+    The host must be on `a2a.allow_hosts`; an empty list means this agent
+    calls nobody, which is the default.
+    """
+    settings = _settings(home, workspace)
+
+    async def _run() -> int:
+        from unified_agent.a2a import A2AClient, A2AClientError
+
+        client = A2AClient(settings)
+        try:
+            call = await client.send(url, message, context_id=context)
+        except A2AClientError as exc:
+            err_console.print(escape(str(exc)))
+            return 1
+        if as_json:
+            console.print_json(json.dumps(call.task, ensure_ascii=False))
+        else:
+            style = "green" if call.state.value == "completed" else "yellow"
+            console.print(f"[{style}]{call.state.value}[/{style}]  [dim]task={call.task.get('id')}[/dim]")
+            if call.answer:
+                console.print(call.answer, markup=False)
+            for problem in call.report.warnings:
+                err_console.print(f"[yellow]card warning: {escape(problem)}[/yellow]")
+        return 0 if call.state.value == "completed" else 1
+
+    raise typer.Exit(asyncio.run(_run()))
 
 
 # ---------------------------------------------------------------------------

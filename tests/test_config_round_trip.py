@@ -179,8 +179,47 @@ class TestConfigSet:
 
         with pytest.raises(ConfigError, match="is a nested table"):
             editor.set("permissions.shell", "3")
-        with pytest.raises(ConfigError, match="edit .* directly"):
-            editor.set("skill_dirs", "skills")
+        with pytest.raises(ConfigError, match="list of tables"):
+            editor.set("mcp_servers", "nope")
+        with pytest.raises(ConfigError, match="is a mapping"):
+            editor.set("permissions.defaults", "allow")
+        # `models` is a table per alias, so the path needs the alias too.
+        with pytest.raises(ConfigError, match=r"models\.<alias>\.<field>"):
+            editor.set("models", "nope")
+
+    def test_a_list_of_scalars_is_settable_from_a_comma_separated_value(
+        self, tmp_path: Path
+    ) -> None:
+        """Several documented settings are lists.
+
+        Refusing every list made `a2a.allow_hosts`,
+        `permissions.network.allow_domains` and `multi_agent.allowed_effects`
+        reachable only by hand-editing TOML -- and the first two are security
+        settings, which is the worst place to have a setting people do not
+        find.
+        """
+        settings = Settings(home=tmp_path, workspace=tmp_path)
+        editor = ConfigEditor(settings, config_file=tmp_path / "config.toml")
+
+        assert editor.set("a2a.allow_hosts", "a.example.com, b.example.com") == [
+            "a.example.com",
+            "b.example.com",
+        ]
+        assert settings.a2a.allow_hosts == ["a.example.com", "b.example.com"]
+
+        assert editor.set("permissions.network.allow_domains", "x.test") == ["x.test"]
+        assert editor.set("skill_dirs", "skills, .agent/skills") == ["skills", ".agent/skills"]
+
+        # Enums coerce, and a bad value names the field.
+        assert editor.set("multi_agent.allowed_effects", "read_only,network") == [
+            EffectClass.READ_ONLY,
+            EffectClass.NETWORK,
+        ]
+        with pytest.raises(ConfigError, match="multi_agent.allowed_effects"):
+            editor.set("multi_agent.allowed_effects", "read_only,nonsense")
+
+        # An empty value is an empty list, not an empty string.
+        assert editor.set("a2a.allow_hosts", "") == []
 
     def test_unknown_paths_still_fail_loudly(self, tmp_path: Path) -> None:
         settings = Settings(home=tmp_path, workspace=tmp_path)

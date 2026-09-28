@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextlib as _contextlib
+import json
 import secrets
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Literal
@@ -56,8 +57,14 @@ DEFAULT_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 # Paths that need the guard. The console and its assets do not: a browser
 # cannot read them cross-origin, and the console must load before it has a
 # token to present.
-PROTECTED_PREFIXES = ("/api/",)
-PROTECTED_EXACT = {"/agui"}
+PROTECTED_PREFIXES = ("/api/", "/a2a")
+# The Agent Card is guarded too, which is a deliberate deviation from A2A's
+# public-discovery convention: the card lists this agent's capabilities and
+# skills, and this is a local-first tool where the whole surface is behind
+# the same loopback + token check. A peer therefore has to be configured with
+# credentials rather than discovering them -- which is the safer direction,
+# and the card advertises the scheme it needs.
+PROTECTED_EXACT = {"/agui", "/.well-known/agent-card.json"}
 
 # Effects a UI can pre-approve via the request body. SYSTEM_ADMIN is
 # deliberately excluded: it must never be grantable by a web request.
@@ -373,6 +380,67 @@ def create_app(
     async def skill_runs(name: str | None = None) -> list[dict[str, Any]]:
         return svc.a.store.list_skill_runs(skill_name=name)
 
+    # -- A2A v1.0 ---------------------------------------------------------
+    def _a2a_server() -> Any:
+        from unified_agent.a2a import A2AServer
+
+        return A2AServer(svc.a, token_required=bool(token))
+
+    def _base_url(request: Request) -> str:
+        """Where this agent says it lives.
+
+        A proxy deployment must set `a2a.public_url`: the request's own
+        base_url is whatever the proxy forwarded, and a card advertising an
+        internal address is a card peers cannot use.
+        """
+        if svc.settings.a2a.public_url:
+            return svc.settings.a2a.public_url.rstrip("/")
+        return str(request.base_url).rstrip("/")
+
+    @app.get("/.well-known/agent-card.json")
+    async def agent_card(request: Request) -> dict[str, Any]:
+        if not svc.settings.a2a.enabled:
+            raise HTTPException(
+                status_code=404,
+                detail="A2A is not enabled; set a2a.enabled to publish this agent",
+            )
+        card = _a2a_server().card(url=f"{_base_url(request)}/a2a")
+        return card.model_dump(mode="json")
+
+    @app.post("/a2a")
+    async def a2a_endpoint(request: Request) -> Any:
+        """The JSON-RPC binding, on one endpoint.
+
+        `message/stream` answers with SSE rather than a JSON-RPC response,
+        which is what the spec's HTTP binding says: the streaming method
+        returns a stream, and the JSON-RPC envelope only frames the
+        unary methods.
+        """
+        if not svc.settings.a2a.enabled:
+            raise HTTPException(
+                status_code=404,
+                detail="A2A is not enabled; set a2a.enabled to accept peers",
+            )
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001 - a malformed body is a JSON-RPC parse error
+            return {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": "request body is not JSON"},
+            }
+        if isinstance(payload, dict) and payload.get("method") == "message/stream":
+            return StreamingResponse(
+                _a2a_sse(_a2a_server(), payload),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        return await _a2a_server().handle(payload)
+
     @app.get("/api/v1/memory")
     async def list_memory(scope: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return svc.a.store.list_memories(scope=scope, limit=limit)
@@ -558,6 +626,33 @@ def _encode(encoder: agui.AgUiEncoder, item: Any) -> list[dict[str, Any]]:
     if item.is_durable and item.event is not None:
         return encoder.on_event(item.event)
     return []
+
+
+async def _a2a_sse(server: Any, payload: dict[str, Any]) -> AsyncIterator[str]:
+    """Frame A2A status updates as SSE.
+
+    Each frame carries the JSON-RPC id, so a client multiplexing several
+    requests on one connection can attribute them -- and so the stream is
+    still a JSON-RPC binding rather than a second, undocumented protocol.
+    """
+    request_id = payload.get("id")
+    params = payload.get("params") or {}
+    if not isinstance(params, dict):
+        params = {}
+    try:
+        async for update in server.stream(params):
+            frame = {"jsonrpc": "2.0", "id": request_id, "result": update}
+            yield f"data: {json.dumps(frame, ensure_ascii=False)}\n\n"
+    except Exception as exc:  # noqa: BLE001 - the peer gets an error frame, not a dropped socket
+        error = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": -32603,
+                "message": f"{type(exc).__name__}: {exc}"[:300],
+            },
+        }
+        yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
 
 async def _agui_events(

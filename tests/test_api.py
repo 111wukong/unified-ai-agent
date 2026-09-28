@@ -534,6 +534,89 @@ class TestWireFormatInvariants:
 
 
 
+class TestA2A:
+    """The A2A surface over HTTP: card discovery and the JSON-RPC binding."""
+
+    def test_the_card_is_absent_until_a2a_is_enabled(self, api, settings) -> None:  # noqa: ANN001
+        """Publishing an endpoint that accepts work from other agents is a
+        decision, so the route says so rather than 404-ing silently."""
+        client = api([])
+        with client:
+            response = client.get("/.well-known/agent-card.json")
+        assert response.status_code == 404
+        assert "a2a.enabled" in response.json()["detail"]
+
+    def test_the_card_describes_the_agent(self, api, settings) -> None:  # noqa: ANN001
+        settings.a2a.enabled = True
+        settings.a2a.name = "test-agent"
+        client = api([])
+        with client:
+            card = client.get("/.well-known/agent-card.json").json()
+        assert card["name"] == "test-agent"
+        assert card["protocolVersion"] == "1.0"
+        assert card["url"].endswith("/a2a")
+        assert card["capabilities"]["streaming"] is True
+        # Honest: this build does not send webhooks, so it must not say it does.
+        assert card["capabilities"]["pushNotifications"] is False
+
+    def test_message_send_over_http(self, api, settings) -> None:  # noqa: ANN001
+        settings.a2a.enabled = True
+        client = api([{"content": "hello from the peer"}])
+        with client:
+            response = client.post(
+                "/a2a",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "method": "message/send",
+                    "params": {
+                        "message": {
+                            "role": "user",
+                            "parts": [{"kind": "text", "text": "do the thing"}],
+                        }
+                    },
+                },
+            )
+        body = response.json()
+        assert "error" not in body, body.get("error")
+        assert body["result"]["status"]["state"] == "completed"
+
+    def test_a_malformed_body_is_a_json_rpc_parse_error(self, api, settings) -> None:  # noqa: ANN001
+        settings.a2a.enabled = True
+        client = api([])
+        with client:
+            response = client.post(
+                "/a2a", content=b"not json", headers={"content-type": "application/json"}
+            )
+        assert response.status_code == 200
+        assert response.json()["error"]["code"] == -32700
+
+    def test_message_stream_is_served_as_sse(self, api, settings) -> None:  # noqa: ANN001
+        settings.a2a.enabled = True
+        client = api([{"content": "streamed"}])
+        with client:
+            response = client.post(
+                "/a2a",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "method": "message/stream",
+                    "params": {
+                        "message": {
+                            "role": "user",
+                            "parts": [{"kind": "text", "text": "go"}],
+                        }
+                    },
+                },
+            )
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        events = parse_sse(response.text)
+        assert events, "the stream carried nothing"
+        assert events[0]["result"]["state"] == "submitted"
+        assert events[-1]["result"]["final"] is True
+
+
 class TestGuard:
     """Host allowlist and session token.
 
@@ -651,6 +734,25 @@ class TestGuard:
         with client:
             assert client.get("/api/v1/health").status_code == 200
             assert client.get("/api/v1/health", headers={"Host": "evil.example"}).status_code == 403
+
+    def test_the_a2a_surface_is_guarded_like_everything_else(self, guarded, settings) -> None:  # noqa: ANN001
+        """Otherwise the token is bypassed by calling the agent through A2A.
+
+        The Agent Card is behind the same check rather than being public
+        discovery, which is a deliberate deviation from A2A's convention: the
+        card lists this agent's skills, and this is a local-first tool where
+        the whole surface sits behind loopback + token.
+        """
+        settings.a2a.enabled = True
+        client = guarded(token="s3cret")
+        with client:
+            assert client.get("/.well-known/agent-card.json").status_code == 403
+            assert (
+                client.post("/a2a", json={"jsonrpc": "2.0", "method": "tasks/get"}).status_code
+                == 403
+            )
+            # With the token it gets through to the route, not to the guard.
+            assert client.get("/.well-known/agent-card.json?token=s3cret").status_code == 200
 
     def test_health_reports_whether_a_token_is_required(self, guarded) -> None:
         with guarded(token=None) as client:
