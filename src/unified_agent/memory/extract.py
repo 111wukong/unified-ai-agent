@@ -41,18 +41,52 @@ to it, each with an id.
 
 Choose exactly one action:
 
+- `add` — the fact is worth keeping. This is the normal answer.
+- `duplicate` — a listed memory already says this. No write happens.
+- `none` — not worth remembering at all.
+
+You may not supersede or modify a stored memory. If the new fact contradicts
+an older one, `add` it: both are kept, the newer carries a later timestamp,
+and the contradiction stays visible to whoever reads them.
+
+That restriction is deliberate. Deciding that an older fact is now wrong is a
+judgement with no reliable prior -- two facts are often complementary rather
+than contradictory ("lives in New York" and "moved to San Francisco"), and
+getting it wrong hides a fact silently and permanently. A contradiction
+someone can see is a smaller problem than a fact that quietly disappeared.
+
+Rules:
+
+- Never invent an id. If you refer to a memory, use one from the list.
+- Prefer `none` for anything transient (this task's output, a file you read)
+  and for anything the repository already states plainly.
+- Return JSON only.
+"""
+
+#: The prompt used when `memory.allow_supersede` is on. Kept because a
+#: deployment that wants write-time reconciliation is a legitimate choice --
+#: it is simply not the default, and the default is the one that cannot lose
+#: a fact.
+CURATOR_PROMPT_SUPERSEDE = """\
+You maintain the long-term memory of a coding agent.
+
+A new fact has been proposed. Below it are the existing memories most similar
+to it, each with an id.
+
+Choose exactly one action:
+
 - `add` — the fact is new and does not conflict with anything listed.
 - `update` — the fact supersedes one of the listed memories. Put that
-  memory's id in `target_id`. Prefer `update` over `add` whenever the new
-  fact corrects, narrows or extends an existing one: the old memory is kept
-  as history, not deleted, so there is no cost to being decisive.
+  memory's id in `target_id`. The old memory is kept as history, not deleted,
+  so there is no cost to being decisive.
 - `duplicate` — a listed memory already says this. No write happens.
 - `none` — not worth remembering at all.
 
 Rules:
 
-- A changed preference is an `update`, not an `add`. "uses pytest" followed
-  by "migrated to unittest" must not leave both in the store.
+- Prefer `update` only when the new fact is clearly about the same subject and
+  strictly replaces the old one. Two facts that are merely related are not a
+  supersession, and treating them as one hides a fact permanently.
 - Never invent a `target_id`. Use only ids from the list, or null.
 - Prefer `none` for anything transient (this task's output, a file you read)
   and for anything the repository already states plainly.
@@ -78,6 +112,27 @@ CURATOR_SCHEMA: dict[str, Any] = {
     "required": ["action"],
     "additionalProperties": False,
 }
+
+
+def curator_schema(*, allow_supersede: bool) -> dict[str, Any]:
+    """The judge's output schema, without actions it is not allowed to take.
+
+    Narrowing the enum rather than rejecting the answer afterwards: a model
+    that is offered `update` will use it, and "reject it and add instead"
+    spends the tokens anyway and leaves the reason it wanted to supersede
+    unrecorded.
+    """
+    actions = (
+        ["add", "update", "duplicate", "none"]
+        if allow_supersede
+        else ["add", "duplicate", "none"]
+    )
+    schema = dict(CURATOR_SCHEMA)
+    schema["properties"] = {
+        **CURATOR_SCHEMA["properties"],
+        "action": {"type": "string", "enum": actions},
+    }
+    return schema
 
 
 class Verdict(str, Enum):
@@ -143,11 +198,17 @@ class MemoryCurator:
         embeddings: EmbeddingProvider | None = None,
         model: Any = None,
         neighbour_limit: int = 5,
+        allow_supersede: bool = False,
     ) -> None:
         self.store = store
         self.embeddings = embeddings
         self.model = model
         self.neighbour_limit = neighbour_limit
+        # Off by default: superseding hides an existing memory from search,
+        # and the judgement behind it has no reliable prior. A contradiction
+        # someone can see is a smaller problem than a fact that quietly
+        # disappeared.
+        self.allow_supersede = allow_supersede
 
     # -- neighbours --------------------------------------------------------
     async def neighbours(self, candidate: Candidate, *, scope: str = "project") -> list[dict]:
@@ -193,11 +254,20 @@ class MemoryCurator:
         try:
             response = await self.model.chat(
                 [
-                    Message(role="system", content=CURATOR_PROMPT),
+                    Message(
+                        role="system",
+                        content=(
+                            CURATOR_PROMPT_SUPERSEDE
+                            if self.allow_supersede
+                            else CURATOR_PROMPT
+                        ),
+                    ),
                     Message(role="user", content=prompt),
                 ],
                 temperature=0.0,
-                response_format=_response_format(self.model),
+                response_format=_response_format(
+                    self.model, allow_supersede=self.allow_supersede
+                ),
                 max_output_tokens=600,
             )
         except Exception:  # noqa: BLE001 - a judge failure must not lose the fact
@@ -220,6 +290,21 @@ class MemoryCurator:
 
         verdict = Verdict(action)
         target = payload.get("target_id")
+        # Defence in depth: the schema already omits `update`, but a provider
+        # that ignores `response_format` can still return it, and the whole
+        # point of the default is that a fact cannot be hidden by a model
+        # judgement. So the restriction is enforced here too, not only asked
+        # for in the prompt.
+        if verdict is Verdict.UPDATE and not self.allow_supersede:
+            return Decision(
+                candidate,
+                Verdict.ADD,
+                reason=(
+                    "the judge wanted to supersede a memory, which is disabled "
+                    "(memory.allow_supersede); added instead so nothing is hidden"
+                ),
+                considered=considered,
+            )
         # A model that names a target that was never shown is hallucinating;
         # treat it as an add rather than pointing at a random row.
         if verdict is Verdict.UPDATE and target not in considered:
@@ -338,14 +423,18 @@ class MemoryCurator:
         return vector_key_for(self.embeddings)
 
 
-def _response_format(model: Any) -> dict[str, Any] | None:
+def _response_format(model: Any, *, allow_supersede: bool = True) -> dict[str, Any] | None:
     caps = getattr(model, "capabilities", None)
     if caps is None:
         return None
     if getattr(caps, "json_schema", False):
         return {
             "type": "json_schema",
-            "json_schema": {"name": "memory_decision", "schema": CURATOR_SCHEMA, "strict": True},
+            "json_schema": {
+                "name": "memory_decision",
+                "schema": curator_schema(allow_supersede=allow_supersede),
+                "strict": True,
+            },
         }
     if getattr(caps, "json_object", False):
         return {"type": "json_object"}

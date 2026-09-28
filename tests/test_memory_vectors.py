@@ -383,7 +383,9 @@ class TestCurator:
         judge = _Judge(
             {"action": "update", "target_id": old, "reason": "migrated to unittest"}
         )
-        curator = MemoryCurator(store=store, embeddings=NullEmbeddings(), model=judge)
+        curator = MemoryCurator(
+            store=store, embeddings=NullEmbeddings(), model=judge, allow_supersede=True
+        )
         result = await curator.ingest([Candidate(content="项目改用 unittest 跑测试")])
 
         assert len(result.updated) == 1
@@ -398,7 +400,9 @@ class TestCurator:
         # neighbour to hallucinate a target from and the guard is not reached.
         store.add_memory(content="the project uses pytest for its tests")
         judge = _Judge({"action": "update", "target_id": "mem_does_not_exist"})
-        curator = MemoryCurator(store=store, embeddings=NullEmbeddings(), model=judge)
+        curator = MemoryCurator(
+            store=store, embeddings=NullEmbeddings(), model=judge, allow_supersede=True
+        )
         result = await curator.ingest(
             [Candidate(content="the project uses pytest with coverage enabled")]
         )
@@ -464,7 +468,9 @@ class TestCurator:
         judge = _Judge(
             {"action": "update", "target_id": old, "content": "the command is python -m pytest"}
         )
-        curator = MemoryCurator(store=store, embeddings=NullEmbeddings(), model=judge)
+        curator = MemoryCurator(
+            store=store, embeddings=NullEmbeddings(), model=judge, allow_supersede=True
+        )
         result = await curator.ingest([Candidate(content="the command is pytest -q")])
         new_id = result.updated[0][1]
         assert "python -m pytest" in store.get_memory(new_id)["content"]
@@ -543,6 +549,80 @@ class TestMemoryService:
             store.close()
 
 
+class TestSupersedeIsOffByDefault:
+    """A model judgement must not be able to hide a stored fact.
+
+    Superseding takes a memory out of search results. The judgement behind it
+    -- "this new fact replaces that old one" -- has no reliable prior: two
+    facts are often complementary rather than contradictory, and the failure
+    is silent and effectively permanent. A contradiction someone can see is a
+    smaller problem than a fact that quietly disappeared.
+
+    mem0 measured +26 points on LongMemEval by removing write-time
+    reconciliation altogether, and this project's six-tier permission model
+    already refuses to let a model approve its own tools. Same principle.
+    """
+
+    async def test_the_default_adds_instead_of_superseding(self, store: Store) -> None:
+        old = store.add_memory(content="项目用 pytest 跑测试")
+        judge = _Judge({"action": "update", "target_id": old, "reason": "migrated"})
+        curator = MemoryCurator(store=store, embeddings=NullEmbeddings(), model=judge)
+
+        result = await curator.ingest([Candidate(content="项目改用 unittest 跑测试")])
+
+        assert result.added, "the fact must still be kept"
+        assert not result.updated
+        assert result.decisions[0].verdict is Verdict.ADD
+        assert "allow_supersede" in result.decisions[0].reason
+        # Nothing was hidden: both facts are live.
+        assert store.get_memory(old)["superseded_by"] is None
+        assert store.memory_stats()["superseded"] == 0
+        assert store.memory_stats()["active"] == 2
+
+    async def test_the_prompt_and_schema_do_not_offer_the_action(self) -> None:
+        """Narrowing the enum rather than rejecting the answer afterwards: a
+        model that is offered `update` will use it."""
+        from unified_agent.memory.extract import (
+            CURATOR_PROMPT,
+            CURATOR_PROMPT_SUPERSEDE,
+            curator_schema,
+        )
+
+        assert "update" not in curator_schema(allow_supersede=False)["properties"]["action"]["enum"]
+        assert "update" in curator_schema(allow_supersede=True)["properties"]["action"]["enum"]
+        assert "may not supersede" in CURATOR_PROMPT
+        assert "may not supersede" not in CURATOR_PROMPT_SUPERSEDE
+
+    async def test_a_provider_that_ignores_the_schema_is_still_held_to_it(
+        self, store: Store
+    ) -> None:
+        """Defence in depth. A gateway that ignores `response_format` can
+        still return `update`, and the restriction has to hold anyway -- the
+        point is that a fact cannot be hidden by a model judgement."""
+        old = store.add_memory(content="the deploy target is staging")
+        # A judge that always answers `update`, whatever the schema says.
+        judge = _Judge({"action": "update", "target_id": old})
+        curator = MemoryCurator(store=store, embeddings=NullEmbeddings(), model=judge)
+
+        result = await curator.ingest([Candidate(content="the deploy target is production")])
+
+        assert result.added
+        assert store.get_memory(old)["superseded_by"] is None
+
+    async def test_turning_it_on_restores_the_old_behaviour(self, store: Store) -> None:
+        """The mechanism is still there for a store that must stay small; it
+        is simply not what happens unless asked."""
+        old = store.add_memory(content="the command is pytest")
+        judge = _Judge({"action": "update", "target_id": old, "reason": "moved"})
+        curator = MemoryCurator(
+            store=store, embeddings=NullEmbeddings(), model=judge, allow_supersede=True
+        )
+        result = await curator.ingest([Candidate(content="the command is python -m pytest")])
+
+        assert len(result.updated) == 1
+        assert store.get_memory(old)["superseded_by"] is not None
+
+
 class TestSaveMemoryToolIntegration:
     async def test_the_tool_reports_which_verdict_it_got(self, store: Store) -> None:
         """'saved' and 'replaced an older fact' are different outcomes."""
@@ -554,7 +634,9 @@ class TestSaveMemoryToolIntegration:
         service = MemoryService(
             store,
             embeddings=NullEmbeddings(),
-            curator=MemoryCurator(store=store, embeddings=NullEmbeddings(), model=judge),
+            curator=MemoryCurator(
+                store=store, embeddings=NullEmbeddings(), model=judge, allow_supersede=True
+            ),
         )
         ctx = ToolContext(
             task_id="t",

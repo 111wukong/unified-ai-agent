@@ -255,6 +255,7 @@ def build_memory_service(
         embeddings=embeddings,
         model=model if config.reconcile else None,
         neighbour_limit=config.neighbour_limit,
+        allow_supersede=config.allow_supersede,
     )
     service = MemoryService(store, embeddings=embeddings, curator=curator)
     service.min_similarity = config.min_similarity

@@ -364,6 +364,21 @@ class MemoryConfig(BaseModel):
     # "nothing in common"; it is not a relevance threshold.
     min_similarity: float = 0.0
     reconcile: bool = True
+    #: Whether the curator may supersede an existing memory.
+    #:
+    #: Off, and that is the important part. Superseding hides a memory from
+    #: search, and the judgement behind it -- "this new fact replaces that old
+    #: one" -- has no reliable prior: two facts are often complementary rather
+    #: than contradictory ("lives in New York" and "moved to San Francisco").
+    #: Getting it wrong loses a fact silently and permanently, whereas a
+    #: visible contradiction is merely inconvenient. Measured elsewhere: mem0
+    #: removed write-time reconciliation entirely and gained 26 points on
+    #: LongMemEval.
+    #:
+    #: Turning it on is a legitimate choice for a store that must stay small;
+    #: it is simply not the default, and the default is the one that cannot
+    #: lose data.
+    allow_supersede: bool = False
 
 
 class SandboxConfig(BaseModel):

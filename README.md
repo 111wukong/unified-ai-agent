@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-614%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-658%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -19,6 +19,7 @@ uaa desktop                                                 # 原生桌面窗口
 uaa desktop --bundle                                        # 打成可双击的 .app
 uaa sandbox                                                 # 报告进程隔离实际是否生效
 uaa skill list                                              # 技能，含等待人工审核的候选
+uaa task rewind <task_id>                                   # 预览：还原这个任务改过的文件
 ```
 
 ---
@@ -217,6 +218,7 @@ src/unified_agent/
 ├── cli.py
 ├── agent/
 │   ├── state.py        AgentState / PlanStep / LogEntry / replay()
+│   ├── rewind.py       文件检查点与回退：从事件算出该还原什么
 │   ├── runtime.py      主循环、预算闸门、恢复语义、HITL
 │   ├── context.py      预算与压缩
 │   ├── planner.py      结构化规划 + 修复环
@@ -485,6 +487,106 @@ uaa desktop --bundle             # ~/Applications/UnifiedAgent.app，可双击
 > `uv pip install --python .venv/bin/python "pywebview>=5.0"`。
 > 这是 pip 在某些受限环境下创建临时目录失败，uv 走的是另一套机制。
 
+## 从做得好的项目里抄来的四件事
+
+对着 GitHub 上做得最好的几个 agent 项目（OpenHands、Aider、Cline、SWE-agent、goose、Codex CLI、Gemini CLI、Letta、mem0、smolagents）做了一轮对比，挑出**被证明有效、且能移植**的机制。四条都落地了，并且每条都带着它解决的**具体失败模式**。
+
+### 1. 文件检查点与回退（来自 Gemini CLI 的 checkpoint 思路）
+
+**失败模式**：agent 改坏一堆文件，你只能 `git checkout` 连自己未提交的工作一起丢掉。本项目的运行时能把**状态**完美回放，却**回不了文件**——它清楚知道是哪一步毁掉的，但放不回去。
+
+**做法**：不引入影子 git 仓库（演示项目本身就不是 git 仓库，也不该依赖 git 存在），而是把已有的写前纪律往前延伸一步：
+
+```
+ledger(begin) → checkpoint(原文件) → execute → ledger(end)
+```
+
+**在工具跑之前**抓原文件，理由和台账一样：进程死在写入中途时，事前那份是唯一留下的。工具通过 `ToolSpec.snapshot_paths` **声明**哪些参数指向文件，于是「这个工具能破坏什么」可以从工具自己的定义里读出来。
+
+原文件**原样存储、不脱敏**——这是对「产物一律脱敏」的一条刻意例外：检查点存在的意义就是**逐字节写回**，脱敏过的副本还原出来是坏文件。内容本来就是工作区里的文件，同一个信任域。
+
+```bash
+uaa task rewind <task_id>            # 默认只预览
+uaa task rewind <task_id> --apply    # 真还原
+uaa task rewind <task_id> --from-seq 42   # 只撤销 seq 42 之后的写入
+```
+
+预览是默认，`--apply` 才动手：还原文件是**唯一真正有破坏性的那件事**（可能覆盖 agent 之后的人工改动），所以它必须被明确要求，而不是一个「看看发生了什么」的命令的默认行为。
+
+### 2. 编辑顺序无关 + 落地前语法门禁（来自 Cline 与 SWE-agent）
+
+**失败模式一（顺序）**：原来是把多条编辑**依次**作用在变化的字符串上。看着等价于「都对原文解析」，实际不是：
+
+```
+原文:  x = 1
+       y = 2
+编辑1: "x = 1" → "y = 2"
+编辑2: "y = 2" → "z = 3"
+```
+
+依次执行时，编辑1 让文件变成 `y = 2\ny = 2\n`，编辑2 然后替换**第一个** `y = 2`——也就是编辑1 刚写进去的那个。原来的 `y = 2` 原封不动地留下，**模型的意图被静默反转**。文件看起来被编辑过，而且是错的。
+
+现在每条编辑都**对原文解析**、按偏移从后往前应用，重叠的区间直接拒绝（重叠就是换了个名字的顺序依赖）。Cline 实测这一形状让 diff 成功率提升 10–25%。
+
+**失败模式二（语法）**：一条编辑干净地落地、留下一个谁都解析不了的文件，错误会在好几步之后以一条莫名其妙的测试失败浮现，而模型基于错误前提通常会去「修」别的地方。现在**落地前先解析**：Python / JSON / TOML / YAML（都已安装的解析器，不为这个加依赖），不过就整块拒绝并回灌错误。未知扩展名不猜；`mode: append` 不检查（半截文件本来就不该能解析）；`allow_syntax_errors` 留给「就是要写一个不合法文件」的场合——**没有出口的规则会被绕过，而不是被遵守**。
+
+### 3. 旧条目保留头部、丢掉正文（来自 Claude Code 的 MicroCompact）
+
+**失败模式**：原来把旧工具结果压成**更小的正文**，token 照样花；预算耗尽时最老的条目被**整条丢弃**，于是模型失去了「我已经做过什么」的记录，会去重跑那些它已经看不到结果的调用。
+
+现在超过 `keep_recent_observations` 的条目只渲染**一行**：工具、参数、成功与否、回了多少字符。几十个字符，所以**整段动作历史都放得下**，而模型真正需要的那条事实（「我已经读过 app.py，成功了」）零成本地保住了——`OUTCOME UNKNOWN` 标记也一样保住。
+
+`should_compact` **仍然量原始日志**，这是刻意的：它触发的是**状态增长**，不是「提示词放不放得下」（渲染已经免费保证了放得下）。量渲染后的形态等于永不压缩，状态无限增长。
+
+### 4. 模型不得销毁记忆（来自 mem0 v3）
+
+**失败模式**：curator 原本让模型判 `add / update / duplicate / none`，`update` 会调用 `invalidate_memory` 把旧记忆**从检索里隐藏**。而「这条新事实取代那条旧的」这个判断**没有可靠先验**——两条事实往往是互补而非矛盾（「住在纽约」和「搬到了旧金山」），判错的代价是**一条事实静默地、永久地消失**。
+
+mem0 v3 把写时调和整个删掉、改成 ADD-only，LongMemEval 涨了 26 分（时序推理 51 → 93）。本项目的 curator 正是那个被废弃的形态。
+
+**改法**：默认 `memory.allow_supersede = false`，模型的动作只剩 `add / duplicate / none`。矛盾保留、由检索端看到，而不是被谁藏起来。**schema 的 enum 也一起收窄**，不是事后拒绝——被提供了 `update` 的模型一定会用它。而且**运行时不只靠提示词**：provider 忽略 `response_format` 时，代码里还有一道，因为这里的要点是「事实不能因为一次模型判断而消失」。
+
+这和本项目既有的原则是同一条：**模型不能批准自己的工具，也不能销毁自己的记忆。**
+
+`memory.allow_supersede = true` 可以恢复旧行为——一个必须保持精简的库是正当需求，只是它不是默认值，而默认值是那个**不会丢数据**的。
+
+---
+
+## 与 OpenClaw / Hermes 的关系，以及哪些差距**不该**补
+
+先直接回答：**不是各方面都优于它们，而且不应该追求这个。** 三者不是同一类东西。
+
+| | 本项目的定位 | OpenClaw / Hermes 的定位 |
+|---|---|---|
+| 形态 | 一个**运行时**（内核 + 库 + CLI + 服务层） | 一个**个人助理平台**（常驻、多渠道、有插件生态） |
+| 强项 | 执行语义的严谨性：可中断可恢复、写前台账、权限闸门、可回退、审计可查 | 触达面：飞书/微信/Telegram 等渠道、cron、设备、浏览器、插件市场 |
+| 典型用法 | `uaa run "修这个 bug"`，或作为库被别的系统调用 | 挂在渠道上，随时被消息唤起 |
+
+**它们有而本项目没有的**：渠道适配器、常驻调度（cron）、浏览器操作、插件市场、TS SDK。
+
+**其中大部分不该补**，理由不是"没时间"，是**补了会让这个项目更差**：
+
+| 差距 | 结论 | 理由 |
+|---|---|---|
+| 渠道适配器 | **不做** | 单机自用不产生价值，却把 prompt-injection 面和鉴权面从"一个受控入口"扩大成"N 个不可控入口"。要接渠道，正确的做法是让渠道服务调用本项目的 HTTP/A2A 层，而不是把渠道塞进内核 |
+| TypeScript SDK | **不做** | 没有第三方消费者时，它是纯维护负担。已经有 OpenAPI（`/docs`）和 A2A，需要时按需生成 |
+| 浏览器操作 | **缓** | CDP 的维护成本很高，而多数编码任务用 shell + `http_get` 已经覆盖。真需要时，它应该是一个 MCP server，而不是内核的一部分 |
+| 代码库索引 / repo map | **不做** | Aider 的 tree-sitter + PageRank repo map 是好东西，但 Anthropic 明确主张 agent 用 **just-in-time 检索**（grep/glob + 渐进式揭示），理由是陈旧索引和复杂语法树是坑。本项目的 `search_files` 已经是这个形状——**这里是对的，别改** |
+| 插件市场 | **不做** | 单用户场景下 Skills + MCP 已经覆盖，市场是给多租户平台准备的 |
+
+**它们没有而本项目有的**（这些是真正值得保留的差异）：
+
+- **可中断可恢复 + 写前台账**：崩溃后能区分「肯定没跑」和「可能跑过」，非幂等调用标记 `ambiguous` 并让模型去验证，而不是盲目重跑
+- **文件级回退**：`uaa task rewind` 能把一个任务改过的文件按检查点还原。它们能回放会话，回不了工作区
+- **六档强制权限 + 执行向量防护**：`.git/hooks`、`.git/config` 这类「延迟执行的代码」被钉死不可写——写一个 hook 等于在审批闸门之外植入代码
+- **拒绝让模型销毁数据**：记忆不允许被模型判定「已被取代」而隐藏（见下），工具审批也不允许模型自己批准
+- **A2A v1.0**：跨组织边界的标准协议，含 SSRF 三重防线与不可信卡片审查
+- **零依赖内核**：SQLite + 标准库，不需要 Node 运行时
+
+**一句话**：它们擅长「随时被叫到」，本项目擅长「被叫到之后做得对、且出错能收场」。要渠道，把本项目当成后端接进去，不要把它改造成渠道平台。
+
+---
+
 ## 桌面端：系统 webview，不是 Electron
 
 窗口是**操作系统自己的 webview**（macOS 上 WKWebView）套在**同一个服务、同一个控制台**外面。没有第二套 UI，没有第二套构建系统，没有捆绑 Chromium。
@@ -574,6 +676,9 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 - 沙箱：第一版用「路径围栏 + 命令白名单 + 环境脱敏」，**没有** Docker。Docker 每条命令 3 秒起的开销不值得，第二版做成可插拔。
 - **A2A 出站请求三重防线**：scheme 必须是 http/https → host 必须在 `a2a.allow_hosts`（默认空 = 谁也不调）→ **解析后的地址必须是公网**（`127.0.0.1` / `169.254.169.254` / `10.x` / `::1` 全拦）。第三条是经典的绕过，也是最常被跳过的检查。重定向逐跳复检，**卡片自己的 `url` 也要过检查**——有效的卡片不等于可信的卡片。
 - **远端 Agent Card 按不可信输入处理**：schema 校验 + 复用技能安全审查的 prompt-injection 检测器扫 `name`/`description`/每个 skill 的描述。
+- **执行向量一律不可写**：`.git/hooks/**`、`.git/config`、`.git/modules/**/config` 即使在工作区内也拒绝写入。理由不是「敏感数据」——读一个 hook 是有用的，agent 应该知道项目跑什么——而是**写入会让代码在之后执行，在审批闸门之外**。这道检查在 `decide` 的围栏步骤里，**`--yes` 覆盖不了它**。
+- **agent 自己的策略与审计日志不可写**：`config.toml` 与 `uaa.db`。正常情况下它们在 workspace 之外、围栏已经挡住；但把 workspace 设成 home 目录会把它们包进来，而「agent 改自己的权限或自己的审计记录」不是任何人的本意。
+- **检查点是唯一不脱敏的产物**：它存在的意义是**逐字节写回**，脱敏过的副本还原出来是坏文件。内容是工作区里已有的文件，同一个信任域。
 
 **A2A 明确没做的两件事**（规范点名，但属于部署关注点而不是库的事）：
 
@@ -593,7 +698,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 | Phase 2 | ✅ FastAPI + SSE/WebSocket（AG-UI）、✅ 沙箱（Seatbelt / Docker） |
 | Phase 3 | ✅ 向量记忆与矛盾处理、✅ 技能审核流程（候选可见 + 状态持久化 + CLI/API 推进） |
 | Phase 4 | ✅ YAML 工作流、✅ 多 Agent（orchestrator-worker）、✅ A2A v1.0（Card + JSON-RPC + SSE） |
-| Phase 5 | ✅ Web 控制台（零构建）、⏸ TypeScript SDK、⏸ 渠道适配器 |
+| Phase 5 | ✅ Web 控制台（零构建）、⛔ TypeScript SDK（无消费者，纯负担）、⛔ 渠道适配器（见下一节的理由） |
 
 调研与采纳决策见 [`docs/phase2-5-research.md`](docs/phase2-5-research.md)。
 
@@ -606,7 +711,7 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 614 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 658 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -693,6 +798,23 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 
 7. **跑一次真的，比再读一遍代码有用。** 前两批是静态审计抓的，这两批只有真跑才现形——一条是跨进程的状态丢失（静态看每处都对），一条是运行时对「模型什么都没说」的分类错误。**审计脚本的盲区是「引用存在但语义错」，只有运行能覆盖。**
 8. **持久化的记录必须被读回来。** workspace 记在 session 里、任务自己却没有——「记录存在」和「记录被使用」是两件事。凡是有持久记录的地方，都要问一句：**谁读它？读到的是不是同一份？**
+
+### 第四批：对标业界时发现的四个机制缺口
+
+对着 OpenHands / Aider / Cline / SWE-agent / goose / Codex CLI / Gemini CLI / Letta / mem0 / smolagents 做了一轮对比（见「从做得好的项目里抄来的四件事」）。四条都是**只有在对比时才看得出来**的：测试全绿、审计零发现，因为它们不是「声明了没接线」，而是**机制本身不存在或形状不对**。
+
+| 缺口 | 为什么危险 |
+|---|---|
+| **`.git/hooks` 可写** | agent 没有 shell 元字符、每条命令过白名单、每个效果等级都被闸门管着——**然后它写了 `.git/hooks/pre-commit`**，之后任何一次 `git commit`（任何人、任何时间）都会执行它。审批闸门全程没参与：代码在**之后**执行，在所有检查之外。`.git/config` 是另一扇同样的门（`core.hooksPath` / `core.pager` / `credential.helper` / `alias.*`） |
+| **没有文件回退** | 运行时能把状态回放到任意一步，却回不了文件。它清楚知道是哪一步毁掉的工作区，**但放不回去** |
+| **`apply_patch` 顺序相关** | 依次替换看着等价于对原文解析，实际会让后一条编辑匹配到前一条刚插入的文本——**模型的意图被静默反转**，文件看起来被编辑过而且是错的 |
+| **旧条目被整条丢弃** | 把旧工具结果压成更小的正文仍然花 token；预算耗尽时最老的条目整条消失，于是模型失去「我做过什么」的记录，会重跑那些它已经看不到结果的调用 |
+| **记忆允许被模型隐藏** | curator 让模型判 `add/update/duplicate/none`，`update` 会把旧记忆**从检索里隐藏**。「这条取代那条」没有可靠先验（互补 ≠ 矛盾），判错就是**一条事实静默永久地消失** |
+
+**带走的经验（续）：**
+
+9. **对标不是列功能表，是找「它解决的那个具体失败模式」。** 上面五条没有一条是「别人有我没有」的功能——`apply_patch` 我也有，只是形状错了。**问「他们为什么这样做」比问「他们做了什么」有用得多。**
+10. **同时要明确「哪些差距不该补」。** 渠道适配器、TS SDK、浏览器、repo map、插件市场——这五项按功能表都该补，按「对单机个人 coding agent 的价值」都该跳过，理由写在「与 OpenClaw / Hermes 的关系」一节里。**对齐功能列表本身是一种失败模式。**
 
 **这一批带走的经验：**
 
