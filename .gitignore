@@ -1,0 +1,31 @@
+# runtime data (never commit: contains task history, memories, artifacts)
+.uaa/
+*.db
+*.db-wal
+*.db-shm
+logs/
+artifacts/
+skills-candidates/
+
+# secrets
+.env
+.env.local
+.env.*.local
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.pytest-tmp/
+.mypy_cache/
+.ruff_cache/
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/

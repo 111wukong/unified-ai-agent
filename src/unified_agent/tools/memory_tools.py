@@ -1,0 +1,254 @@
+"""Memory + skill + plan tools.
+
+`load_skill` is the progressive-disclosure mechanism: only name/description
+of every skill is in the system prompt, and the body (which can be
+thousands of tokens) is pulled in by an explicit tool call. This is the
+concrete answer to "skills instead of prompt accumulation".
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from unified_agent.tools.base import Tool, ToolContext, ToolSpec
+from unified_agent.types import EffectClass, ToolResult
+
+
+class SaveMemoryTool(Tool):
+    spec = ToolSpec(
+        name="save_memory",
+        description=(
+            "Persist a durable fact or lesson for future sessions. Use for stable, "
+            "reusable knowledge (project conventions, verified commands, decisions) — "
+            "not for transient task state."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "minLength": 8, "maxLength": 4000},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "scope": {
+                    "type": "string",
+                    "enum": ["project", "user"],
+                    "description": "project = this repo only; user = everywhere.",
+                },
+                "importance": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": ["content"],
+            "additionalProperties": False,
+        },
+        effect_class=EffectClass.WRITE_LOCAL,
+    )
+
+    def __init__(self, store) -> None:
+        self.store = store
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if ctx.dry_run:
+            return self.dry_run(args, ctx)
+        mid = self.store.add_memory(
+            content=args["content"],
+            session_id=ctx.session_id,
+            scope=args.get("scope") or "project",
+            tags=args.get("tags") or [],
+            importance=float(args.get("importance", 0.5)),
+            source="agent",
+        )
+        return ToolResult(success=True, output=f"memory saved ({mid})", metadata={"id": mid})
+
+
+class SearchMemoryTool(Tool):
+    spec = ToolSpec(
+        name="search_memory",
+        description="Search previously saved memories. Call this before assuming you have no context.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1},
+                "scope": {"type": "string", "enum": ["project", "user"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 25},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        effect_class=EffectClass.READ_ONLY,
+    )
+
+    def __init__(self, store) -> None:
+        self.store = store
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        hits = self.store.search_memories(
+            args["query"], scope=args.get("scope"), limit=int(args.get("limit") or 8)
+        )
+        if not hits:
+            return ToolResult(success=True, output="(no memories matched)", metadata={"count": 0})
+        lines = [
+            f"[{h['scope']}] {h['content']}  (tags: {h['tags'] or '-'}, {h['created_at'][:10]})"
+            for h in hits
+        ]
+        return ToolResult(
+            success=True, output="\n".join(lines), metadata={"count": len(hits)}
+        )
+
+
+class DeleteMemoryTool(Tool):
+    spec = ToolSpec(
+        name="delete_memory",
+        description="Delete a memory by id. Use when a memory is wrong or obsolete.",
+        parameters={
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+        effect_class=EffectClass.WRITE_LOCAL,
+        requires_confirmation=True,
+    )
+
+    def __init__(self, store) -> None:
+        self.store = store
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if ctx.dry_run:
+            return self.dry_run(args, ctx)
+        ok = self.store.delete_memory(args["id"])
+        return ToolResult(
+            success=ok, output="deleted" if ok else "", error=None if ok else "no such memory id"
+        )
+
+
+class LoadSkillTool(Tool):
+    spec = ToolSpec(
+        name="load_skill",
+        description=(
+            "Load the full instructions for a skill listed in the system prompt. "
+            "Call this before doing work that matches a skill's description."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        effect_class=EffectClass.READ_ONLY,
+    )
+
+    def __init__(self, skills) -> None:
+        self.skills = skills
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        name = args["name"]
+        skill = self.skills.get(name)
+        if skill is None:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"unknown skill {name!r}. Available: "
+                    f"{', '.join(s.name for s in self.skills.list()) or '(none)'}"
+                ),
+            )
+        if skill.status != "active":
+            return ToolResult(
+                success=False,
+                error=f"skill {name!r} is {skill.status}, not active; it cannot be used",
+            )
+        return ToolResult(
+            success=True,
+            output=skill.render(),
+            metadata={"skill": name, "allowed_tools": sorted(skill.allowed_tools)},
+        )
+
+
+class UpdatePlanTool(Tool):
+    spec = ToolSpec(
+        name="update_plan",
+        description=(
+            "Replace the current plan and tick steps off. Steps are *intentions* — do not "
+            "pre-bind tool arguments here, decide them when you execute the step. "
+            "Send the complete list every time, with the status of each step, so the "
+            "checklist stays truthful."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 12,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "description": {"type": "string", "minLength": 4},
+                            "expected_tools": {"type": "array", "items": {"type": "string"}},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "running", "completed", "failed", "skipped"],
+                            },
+                            "note": {"type": "string"},
+                        },
+                        "required": ["description"],
+                        "additionalProperties": False,
+                    },
+                },
+                "reason": {"type": "string", "description": "Why the plan changed."},
+            },
+            "required": ["steps"],
+            "additionalProperties": False,
+        },
+        effect_class=EffectClass.READ_ONLY,
+    )
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        steps = args["steps"]
+        marks = {"pending": " ", "running": "~", "completed": "x", "failed": "!", "skipped": "-"}
+        body = "\n".join(
+            f"[{marks.get(s.get('status', 'pending'), ' ')}] {i + 1}. {s['description']}"
+            for i, s in enumerate(steps)
+        )
+        reason = args.get("reason")
+        out = f"plan replaced with {len(steps)} step(s)"
+        if reason:
+            out += f" (reason: {reason})"
+        return ToolResult(
+            success=True, output=f"{out}\n{body}", metadata={"steps": steps, "reason": reason}
+        )
+
+
+class FinishTool(Tool):
+    """Optional explicit completion.
+
+    Not required: a plain assistant message with no tool calls also ends the
+    task. Present because some models (especially via the text protocol)
+    are much more reliable when there is an explicit terminal action.
+    """
+
+    spec = ToolSpec(
+        name="finish",
+        description="Finish the task and return the final answer to the user.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string", "minLength": 1},
+                "status": {"type": "string", "enum": ["completed", "blocked"]},
+            },
+            "required": ["answer"],
+            "additionalProperties": False,
+        },
+        effect_class=EffectClass.READ_ONLY,
+    )
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        return ToolResult(
+            success=True,
+            output=args["answer"],
+            metadata={"final": True, "status": args.get("status") or "completed"},
+        )
+
+
+def build_memory_tools(store) -> list[Tool]:
+    return [SaveMemoryTool(store), SearchMemoryTool(store), DeleteMemoryTool(store)]
+
+
+def build_skill_tools(skills) -> list[Tool]:
+    return [LoadSkillTool(skills)]
