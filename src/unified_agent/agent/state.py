@@ -350,4 +350,12 @@ def replay(events: list, *, task_id: str, session_id: str = "") -> AgentState:
             state.status = TaskStatus.CANCELLED
             state.error = "cancelled by user"
 
+    # A finished task has nothing pending, whatever happened earlier. Set here
+    # rather than in each terminal branch so a future terminal event cannot
+    # forget it: a stale `pending_confirmation` on a cancelled task renders as
+    # a live approval prompt in every reader, and the console offers buttons
+    # that would then fail.
+    if state.status.terminal:
+        state.pending_confirmation = None
+
     return state

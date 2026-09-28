@@ -617,6 +617,46 @@ class TestA2A:
         assert events[-1]["result"]["final"] is True
 
 
+class TestCancelEndpoint:
+    """The console puts a Cancel button next to every approval prompt.
+
+    So this is the path a user is most likely to hit first -- and it used to
+    answer `"cancelling"` while the task sat in `waiting_confirmation` for
+    ever, because a paused task has no loop to read the cancellation marker.
+    """
+
+    def test_cancelling_a_paused_task_actually_cancels_it(self, api, settings) -> None:  # noqa: ANN001
+        client = api(
+            [
+                {"tool_calls": [{"name": "run_command", "arguments": {"command": "ls"}}]},
+            ]
+        )
+        with client:
+            created = client.post("/api/v1/tasks", json={"goal": "run ls"}).json()
+            task_id = created.get("task_id") or created.get("id")
+            client.post(f"/api/v1/tasks/{task_id}/wait", json={"timeout_s": 10})
+
+            paused = client.get(f"/api/v1/tasks/{task_id}").json()
+            assert paused["status"] == "waiting_confirmation", (
+                "the test needs the task paused, or it proves nothing"
+            )
+
+            response = client.post(f"/api/v1/tasks/{task_id}/cancel")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["outcome"] == "cancelled"
+            assert body["status"] == "cancelled"
+
+            after = client.get(f"/api/v1/tasks/{task_id}").json()
+        assert after["status"] == "cancelled"
+
+    def test_an_unknown_task_is_a_404(self, api) -> None:  # noqa: ANN001
+        client = api([])
+        with client:
+            response = client.post("/api/v1/tasks/task_nope/cancel")
+        assert response.status_code == 404
+
+
 class TestGuard:
     """Host allowlist and session token.
 

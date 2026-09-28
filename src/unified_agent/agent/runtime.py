@@ -65,6 +65,78 @@ class AgentResult(BaseModel):
         return self.status == TaskStatus.WAITING_CONFIRMATION.value
 
 
+#: Statuses where a loop is driving the task, so the cancellation marker will
+#: be read at the next step boundary.
+_LIVE_STATUSES = frozenset({TaskStatus.PENDING, TaskStatus.PLANNING, TaskStatus.RUNNING})
+
+
+def cancel_task(store: Any, settings: Settings, task_id: str) -> str:
+    """Cancel a task, and report what actually happened.
+
+    One of `not_found`, `already_terminal`, `cancelled`, `requested`.
+
+    There are two mechanisms and they are not interchangeable, because a
+    running loop holds its own copy of the state and never re-reads the event
+    log:
+
+    * a task being **driven** can only be stopped by the marker file --
+      appending a terminal event would be overwritten by the loop's next
+      write;
+    * a task that is **paused** has no loop to read the marker, so a marker
+      leaves it waiting for ever. It has to be cancelled by recording the
+      terminal state directly.
+
+    Only the marker was implemented. A task paused for approval could
+    therefore never be cancelled: the API answered `"cancelling"`, and nothing
+    happened. That is the state a user is in every time they are looking at an
+    approval prompt -- exactly when they are most likely to want out, and the
+    console's Cancel button is right there.
+
+    A module-level function rather than a method so the CLI, which has a store
+    but no agent, uses the same decision instead of a second copy of it.
+    """
+    row = store.get_task(task_id)
+    if row is None:
+        return "not_found"
+    status = TaskStatus(row["status"])
+    if status.terminal:
+        return "already_terminal"
+
+    if status in _LIVE_STATUSES:
+        marker = settings.state_dir / f"{task_id}.cancel"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(time.time()), encoding="utf-8")
+        return "requested"
+
+    store.append(
+        task_id,
+        EventType.TASK_CANCELLED,
+        {"reason": f"cancelled while {status.value}"},
+    )
+    # `append` writes the event; it does not touch the `tasks` projection --
+    # the loop normally does that itself with `_persist`, and it is not running
+    # here. Without this the event log says cancelled and every read path
+    # (`get_task`, the console, `uaa task list`) still says the old status,
+    # which is how a fix ends up looking like it did nothing.
+    state = replay(store.events(task_id), task_id=task_id, session_id=row.get("session_id") or "")
+    state.status = TaskStatus.CANCELLED
+    state.error = "cancelled"
+    state.pending_confirmation = None
+    store.save_projection(
+        task_id,
+        status=state.status.value,
+        state=state.snapshot(),
+        steps_used=state.steps_used,
+        tokens_in=state.usage.prompt_tokens,
+        tokens_out=state.usage.completion_tokens,
+        cost_usd=state.usage.cost_usd,
+        result={"answer": state.answer, "error": state.error},
+        pending_confirmation=None,
+        error=state.error,
+    )
+    return "cancelled"
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -278,11 +350,10 @@ class AgentRuntime:
         )
         return await self.resume(task_id)
 
-    def cancel(self, task_id: str) -> bool:
-        marker = self.settings.state_dir / f"{task_id}.cancel"
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(time.time()), encoding="utf-8")
-        return True
+    def cancel(self, task_id: str) -> str:
+        """See `cancel_task`. A method so callers holding a runtime need not
+        reach for the module."""
+        return cancel_task(self.store, self.settings, task_id)
 
     def is_cancelled(self, task_id: str) -> bool:
         return (self.settings.state_dir / f"{task_id}.cancel").exists()

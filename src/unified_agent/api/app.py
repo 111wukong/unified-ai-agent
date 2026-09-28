@@ -323,8 +323,22 @@ def create_app(
 
     @app.post("/api/v1/tasks/{task_id}/cancel")
     async def cancel(task_id: str) -> dict[str, Any]:
-        svc.a.runtime.cancel(task_id)
-        return {"id": task_id, "status": "cancelling"}
+        """Cancel a task. Reports what happened rather than assuming.
+
+        A paused task is cancelled outright (nothing is running to read a
+        marker); a running one is asked to stop at its next step boundary.
+        Answering "cancelling" for both is how a Cancel button that does
+        nothing looks like a Cancel button that worked.
+        """
+        outcome = svc.a.runtime.cancel(task_id)
+        if outcome == "not_found":
+            raise HTTPException(status_code=404, detail=f"no such task: {task_id}")
+        row = svc.a.runtime.store.get_task(task_id) or {}
+        return {
+            "id": task_id,
+            "outcome": outcome,
+            "status": row.get("status", "unknown"),
+        }
 
     @app.post("/api/v1/tasks/{task_id}/resume")
     async def resume(task_id: str) -> dict[str, Any]:

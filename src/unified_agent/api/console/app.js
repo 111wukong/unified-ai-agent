@@ -345,11 +345,27 @@ async function send(goal) {
 
 async function cancel() {
   if (!state.taskId) return;
-  await fetch(`/api/v1/tasks/${state.taskId}/cancel`, {
-    method: "POST",
-    headers: authHeaders(),
-  });
-  setStatus("cancelling…", true);
+  // Read the answer. A paused task is cancelled outright and a running one is
+  // only *asked* to stop, so "cancelling…" is wrong half the time -- and a
+  // status line that lies is worse than no status line.
+  try {
+    const response = await fetch(`/api/v1/tasks/${state.taskId}/cancel`, {
+      method: "POST",
+      headers: authHeaders(),
+    });
+    const result = await response.json();
+    if (result.outcome === "cancelled" || result.outcome === "already_terminal") {
+      state.running = false;
+      state.current = newRun();
+      hideApproval();
+      $("btn-cancel").disabled = true;
+      setStatus(result.status || "cancelled", false);
+    } else {
+      setStatus("cancelling…", true);
+    }
+  } catch (error) {
+    setStatus(`cancel failed: ${error}`, false);
+  }
 }
 
 /* -------------------------------------------------------------------- boot */

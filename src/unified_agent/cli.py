@@ -922,12 +922,27 @@ def task_cancel(
     task_id: str,
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """Request cancellation. Works across processes; the running loop stops at its next step."""
+    """Cancel a task. A paused one is cancelled now; a running one stops at its next step."""
+    from unified_agent.agent.runtime import cancel_task
+
     settings = _settings(home, None)
     settings.ensure_dirs()
-    marker = settings.state_dir / f"{task_id}.cancel"
-    marker.write_text("cancel", encoding="utf-8")
-    console.print(f"cancellation requested for {task_id} [dim]({marker})[/dim]")
+    store = _read_store(settings)
+    try:
+        outcome = cancel_task(store, settings, task_id)
+    finally:
+        store.close()
+
+    if outcome == "not_found":
+        err_console.print(f"no such task: {task_id}")
+        raise typer.Exit(1)
+    if outcome == "already_terminal":
+        console.print(f"{task_id} has already finished; nothing to cancel")
+        return
+    if outcome == "cancelled":
+        console.print(f"cancelled {task_id}")
+        return
+    console.print(f"cancellation requested for {task_id} [dim](stops at the next step)[/dim]")
 
 
 # ---------------------------------------------------------------------------

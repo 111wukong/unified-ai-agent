@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-714%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-723%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -739,7 +739,7 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 714 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 723 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -826,6 +826,23 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 
 7. **跑一次真的，比再读一遍代码有用。** 前两批是静态审计抓的，这两批只有真跑才现形——一条是跨进程的状态丢失（静态看每处都对），一条是运行时对「模型什么都没说」的分类错误。**审计脚本的盲区是「引用存在但语义错」，只有运行能覆盖。**
 8. **持久化的记录必须被读回来。** workspace 记在 session 里、任务自己却没有——「记录存在」和「记录被使用」是两件事。凡是有持久记录的地方，都要问一句：**谁读它？读到的是不是同一份？**
+
+### 第六批：真的打开控制台用一次
+
+这一批是**把服务起起来、点界面**时撞到的。前五批分别靠静态审计、真跑一次、对标业界、跑长任务；这一批靠**当成用户去用它**。
+
+| 缺陷 | 为什么只有点界面才会发现 |
+|---|---|
+| **暂停的任务取消不掉** | `cancel` 只写一个标记文件，而那个标记**只在运行中的循环里被读取**。停在 `waiting_confirmation` 的任务没有循环——**永远取消不掉**，而 API 还乐观地回 `"cancelling"`。**这正是用户看到审批框时的状态**，而控制台的 Cancel 按钮就摆在那里 |
+| **取消后审批框还在** | 投影列清掉了，但**折叠出的 state 没有**——每条读路径都渲染一个已经不存在的审批框，而控制台会给它配上按钮 |
+
+两条都指向「一个操作在两个地方有两份状态」：标记 vs 事件，投影列 vs 折叠状态。
+
+**带走的经验（续）：**
+
+16. **起服务、点界面，是审计和测试都替代不了的一步。** 前五批里没有一批能发现「Cancel 按钮点了没反应」——因为**没有任何测试去点它**。写测试的人会绕过自己知道坏掉的地方。
+17. **`append` 写事件，不写投影。** 运行时的循环靠 `_persist(state)` 单独写投影；任何在循环之外发事件的地方，都必须自己更新投影，否则事件流说 A、所有读路径说 B。**一个修复看起来没生效，先查这里。**
+18. **终态要清掉「待处理」的字段，而且只写一次。** 我在 `replay` 末尾统一清 `pending_confirmation`，而不是在每个终态分支里各清一遍——后者会在下一个终态事件出现时被忘掉。
 
 ### 第五批：跑一次长任务才暴露的两个缺陷
 
