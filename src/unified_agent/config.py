@@ -164,6 +164,142 @@ class ShellPolicy(BaseModel):
     # Shell metacharacters are refused unless this is on: they are the
     # standard way a "safe" allowlisted command smuggles a second one.
     allow_metacharacters: bool = False
+    #: argv prefixes that are always denied, whatever the allowlist says.
+    #:
+    #: The allowlist matches on the command *name*, so "allow `python3`" is
+    #: indistinguishable from "allow everything" -- and `git config
+    #: core.hooksPath` writes the file that decides what runs on the next
+    #: commit. The risk lives in the arguments, so the rules have to match the
+    #: arguments. Prefixes are matched against the parsed argv, so
+    #: `git   config` with extra spaces is caught too.
+    #:
+    #: Codex CLI's ExecPolicy calls this the forbidden tier; the shape is the
+    #: same and so is the conclusion about interpreters.
+    forbidden_prefixes: list[str] = Field(
+        default_factory=lambda: [
+            # git's own escape hatches. `config` writes `.git/config`
+            # (hooksPath, pager, credential.helper, alias.*), `-c` sets one for
+            # a single command, and the rest install or rewrite things that run
+            # later. `git status` / `diff` / `log` are unaffected.
+            "git config",
+            "git -c",
+            "git --config-env",
+            "git hook",
+            "git hooks",
+            "git alias",
+            "git filter-branch",
+            "git filter-repo",
+            "git submodule",
+            # interpreters asked to run a *string* rather than a file
+            "python -c",
+            "python3 -c",
+            "python -",
+            "python3 -",
+            "node -e",
+            "node --eval",
+            "node -p",
+            "node --print",
+            "perl -e",
+            "ruby -e",
+            "php -r",
+            "lua -e",
+            "bash -c",
+            "sh -c",
+            "zsh -c",
+            "dash -c",
+            "fish -c",
+            "osascript -e",
+            # commands whose entire purpose is to run another command
+            "env",
+            "xargs",
+            "nohup",
+            "watch",
+            "sudo",
+            "doas",
+            "su",
+        ]
+    )
+    #: argv prefixes that may run, but never without a per-call confirmation.
+    #:
+    #: The tier that makes pre-approval honest. `--approve execute_local` and
+    #: `--yes` say "run commands without asking me each time", which is a
+    #: reasonable thing to want -- but it is not a statement that the agent
+    #: may run arbitrary code unattended, and an interpreter on the allowlist
+    #: makes those two indistinguishable. Codex CLI's ExecPolicy has the same
+    #: middle tier, for the same reason.
+    #:
+    #: These are denied by nothing and allowed by nothing: they always ask.
+    confirm_prefixes: list[str] = Field(
+        default_factory=lambda: [
+            # interpreters: "python3 script.py" runs whatever was just written
+            "python",
+            "python3",
+            "node",
+            "deno",
+            "bun",
+            "perl",
+            "ruby",
+            "php",
+            "lua",
+            "Rscript",
+            # package managers: `npm test` runs package.json scripts
+            "npm",
+            "pnpm",
+            "yarn",
+            "npx",
+            "pip",
+            "pip3",
+            "uv",
+            "poetry",
+            # build tools: they run build scripts from the project
+            "make",
+            "cmake",
+            "gradle",
+            "mvn",
+            "cargo",
+            "go",
+            # shells
+            "bash",
+            "sh",
+            "zsh",
+            "dash",
+            "fish",
+            # git operations that leave the machine or rewrite where it points
+            "git push",
+            "git remote",
+            "git fetch",
+            "git clone",
+            "git clean",
+            "git reset",
+        ]
+    )
+    #: Arguments that make a confirm-prefix command inert.
+    #:
+    #: If *every* argument after the command is one of these, the invocation
+    #: cannot execute anything -- `python3 --version` reports a version and
+    #: stops. Without this the tier fires on it, and a guard that is annoying
+    #: is a guard people switch off, which is a worse outcome than the one it
+    #: was protecting against.
+    inert_args: list[str] = Field(
+        default_factory=lambda: ["--version", "-V", "-VV", "--help", "-h"]
+    )
+    #: Flags that turn an otherwise-inert command into a runner. Checked
+    #: anywhere in the argv, because these are not prefixes: `find . -exec ...`
+    #: puts the danger after the arguments.
+    forbidden_flags: list[str] = Field(
+        default_factory=lambda: [
+            "-exec",
+            "-execdir",
+            "-ok",
+            "-okdir",
+            "-delete",  # `find / -delete` is not a file-listing command
+            "-fprint",
+            "-fprintf",
+            "-fls",
+            "--to-command",  # tar
+            "--checkpoint-action",  # tar
+        ]
+    )
     default_timeout_s: float = 120.0
     # Ceiling on captured stdout+stderr, per command. Applied in
     # `tools/shell.py::_exec`; output past it is cut, not silently dropped

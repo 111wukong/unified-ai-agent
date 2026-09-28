@@ -142,6 +142,13 @@ def _under_any(path: Path, prefixes: list[str]) -> bool:
 class Verdict:
     decision: Decision
     reason: str = ""
+    #: True when this decision may not be downgraded by a blanket approval.
+    #:
+    #: `--approve execute_local` and `--yes` turn CONFIRM into ALLOW, which is
+    #: the point of them. A *sticky* confirmation says "this specific
+    #: invocation is not covered by that", and the only way through is a
+    #: human answering this call.
+    sticky: bool = False
 
     @property
     def allowed(self) -> bool:
@@ -260,12 +267,105 @@ class PathGuard:
 
 
 class CommandGuard:
-    """Static analysis of a shell command string. Best-effort, fails closed."""
+    """Static analysis of a shell command string. Best-effort, fails closed.
+
+    Three tiers, checked in this order, and the order is the point:
+
+    1. **deny patterns** on the raw text -- unambiguous strings like `rm -rf`;
+    2. **forbidden prefixes and flags** on the parsed argv -- invocations whose
+       *arguments* turn an ordinary command into a runner;
+    3. **the allowlist** -- which commands may run at all.
+
+    Tier 2 exists because tier 3 answers a question about the command's
+    *name*, and the risk lives in its arguments. `git` is a safe command;
+    `git config core.hooksPath /tmp/evil` writes the file that decides what
+    runs on the next commit. `python3` is a safe command; `python3 -c "..."`
+    and `python3 script-i-just-wrote.py` are not. An allowlist that only looks
+    at the name cannot tell those apart, so "allow `python3`" quietly means
+    "allow everything".
+
+    The flag tier covers the cases that are not prefixes: `find . -exec ...`
+    puts the danger after the arguments.
+    """
 
     def __init__(self, policy: PermissionConfig) -> None:
         self.allow = [a.strip() for a in policy.shell.allow if a.strip()]
         self.deny_patterns = [re.compile(p) for p in policy.shell.deny_patterns]
         self.allow_metacharacters = policy.shell.allow_metacharacters
+        self.forbidden_prefixes = [
+            tuple(p.split()) for p in policy.shell.forbidden_prefixes if p.strip()
+        ]
+        self.forbidden_flags = {f for f in policy.shell.forbidden_flags if f}
+        self.confirm_prefixes = [
+            tuple(p.split()) for p in policy.shell.confirm_prefixes if p.strip()
+        ]
+        self.inert_args = set(policy.shell.inert_args)
+
+    @staticmethod
+    def _matches_prefix(argv: list[str], parts: tuple[str, ...]) -> bool:
+        """Prefix match on argv, accepting `--flag=value` for a `--flag` rule.
+
+        Without the `=` form, `git --config-env=a=b status` slips past a rule
+        written as `git --config-env` -- the element is one string, not two,
+        and an exact comparison never sees it.
+        """
+        if len(argv) < len(parts):
+            return False
+        for index, expected in enumerate(parts):
+            actual = argv[index]
+            if actual == expected:
+                continue
+            if index == len(parts) - 1 and actual.startswith(expected + "="):
+                continue
+            return False
+        return True
+
+    def _always_confirm(self, argv: list[str]) -> Verdict | None:
+        """Tier 2b: allowed, but never unattended.
+
+        Placed between "forbidden" and "the allowlist" because that is exactly
+        what it means: `python3` is on the allowlist so it may run, and it is
+        listed here so it may not run *without being asked*. Without this tier
+        `--approve execute_local` silently becomes "run arbitrary code
+        unattended", which is not what anyone approving a command class meant.
+        """
+        normalized = [os.path.basename(argv[0]), *argv[1:]]
+        for parts in self.confirm_prefixes:
+            if self._matches_prefix(normalized, parts):
+                rest = argv[len(parts) :]
+                if rest and all(arg in self.inert_args for arg in rest):
+                    # `python3 --version` reports a version and stops. Asking
+                    # about it teaches the user that the prompt is noise.
+                    return None
+                return Verdict(
+                    Decision.CONFIRM,
+                    f"`{' '.join(parts)}` can run anything, so it always needs a "
+                    "per-call confirmation -- a blanket approval of command "
+                    "execution is not a statement about this invocation.",
+                    sticky=True,
+                )
+        return None
+
+    def _forbidden(self, argv: list[str]) -> Verdict | None:
+        """Tier 2. `argv[0]` is normalised so `/usr/bin/git` matches `git`."""
+        normalized = [os.path.basename(argv[0]), *argv[1:]]
+        for parts in self.forbidden_prefixes:
+            if self._matches_prefix(normalized, parts):
+                return Verdict(
+                    Decision.DENY,
+                    f"`{' '.join(parts)}` is a blocked command prefix. It can run "
+                    "code, or install something that runs later, so a blanket "
+                    "approval of command execution is not meant to cover it. Run "
+                    "the specific command you need, or ask the user to run this one.",
+                )
+        for arg in argv[1:]:
+            if arg in self.forbidden_flags or arg.split("=", 1)[0] in self.forbidden_flags:
+                return Verdict(
+                    Decision.DENY,
+                    f"{arg!r} is a blocked flag: it makes an otherwise-inert "
+                    "command run something else.",
+                )
+        return None
 
     def check(self, command: str) -> Verdict:
         text = command.strip()
@@ -285,14 +385,21 @@ class CommandGuard:
                     f"shell metacharacter {found.group(0)!r} is not allowed; "
                     "run one command per call, or enable permissions.shell.allow_metacharacters",
                 )
-        if not self.allow:
-            return ALLOW
         try:
             argv = shlex.split(text)
         except ValueError as exc:
             return Verdict(Decision.DENY, f"could not parse command: {exc}")
         if not argv:
             return Verdict(Decision.DENY, "empty command")
+
+        if forbidden := self._forbidden(argv):
+            return forbidden
+
+        if confirm := self._always_confirm(argv):
+            return confirm
+
+        if not self.allow:
+            return ALLOW
         head = os.path.basename(argv[0])
         joined = " ".join([head, *argv[1:3]])
         for entry in self.allow:
@@ -420,12 +527,20 @@ class PermissionEngine:
                 )
             return Verdict(Decision.DENY, f"{effect.value} is denied by policy")
 
-        # 4. CLI pre-approval
-        if base is Decision.CONFIRM and effect in self.cli_approvals:
+        # 4. CLI pre-approval -- unless the fence said this invocation is not
+        #    covered by one. `--approve execute_local` means "run commands
+        #    without asking each time"; it is not a statement that the agent
+        #    may run arbitrary code unattended, and a sticky confirmation is
+        #    how the two are kept apart.
+        if base is Decision.CONFIRM and effect in self.cli_approvals and not fence.sticky:
             return Verdict(Decision.ALLOW, f"{effect.value} pre-approved on the command line")
 
         if base is Decision.CONFIRM:
-            return Verdict(Decision.CONFIRM, fence.reason or f"{effect.value} needs confirmation")
+            return Verdict(
+                Decision.CONFIRM,
+                fence.reason or f"{effect.value} needs confirmation",
+                sticky=fence.sticky,
+            )
         return ALLOW
 
     def enforce(self, tool: Tool, args: dict[str, Any]) -> None:

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-658%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-702%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -487,9 +487,36 @@ uaa desktop --bundle             # ~/Applications/UnifiedAgent.app，可双击
 > `uv pip install --python .venv/bin/python "pywebview>=5.0"`。
 > 这是 pip 在某些受限环境下创建临时目录失败，uv 走的是另一套机制。
 
-## 从做得好的项目里抄来的四件事
+## 从做得好的项目里抄来的五件事
 
-对着 GitHub 上做得最好的几个 agent 项目（OpenHands、Aider、Cline、SWE-agent、goose、Codex CLI、Gemini CLI、Letta、mem0、smolagents）做了一轮对比，挑出**被证明有效、且能移植**的机制。四条都落地了，并且每条都带着它解决的**具体失败模式**。
+对着 GitHub 上做得最好的几个 agent 项目（OpenHands、Aider、Cline、SWE-agent、goose、Codex CLI、Gemini CLI、Letta、mem0、smolagents）做了一轮对比，挑出**被证明有效、且能移植**的机制。五条都落地了，并且每条都带着它解决的**具体失败模式**。
+
+### 0. 命令判定要读参数，不能只读命令名（来自 Codex CLI 的 ExecPolicy）
+
+**失败模式**：原来的白名单按**命令名**匹配（`head == basename(entry)`），所以「允许 `python3`」实际等于「允许一切」。实测确认了两个真洞：
+
+```
+git config core.hooksPath /tmp/evil     →  ALLOW   ← 绕过上一轮对 .git/config 的写保护
+python3 script.py                       →  ALLOW   ← 先 write_file 写脚本再跑 = 零元字符的任意代码
+python3 -c "..."                        →  DENY    ← 但只是因为 ( 是元字符，偶然挡住
+```
+
+第三个尤其说明问题：**它是偶然被挡住的，不是被设计挡住的**。哪天有人为了别的需求打开 `allow_metacharacters`，这道防线就没了。
+
+现在三层，**顺序就是要点**：
+
+| 层 | 判据 | 例子 |
+|---|---|---|
+| 1. deny 模式 | 原文匹配 | `rm -rf` |
+| 2. **forbidden 前缀 / flag** | **解析后的 argv** | `git config`、`git -c`、`python3 -c`、`find -exec`、`env`、`xargs` |
+| 2b. **sticky CONFIRM** | argv 前缀，**`--yes` 压不掉** | `python3`、`node`、`npm`、`make`、`cargo`、`bash`、`git push` |
+| 3. allowlist | 命令名 | `pytest`、`ls`、`git status` |
+
+**第 2b 层是最重要的一个设计决定。** 把解释器从白名单里删掉是容易的修法，也是错的——白名单是**硬拒**而不是「退回询问」，所以删掉等于彻底封杀 `python3 script.py`，而 agent 确实需要它。正确形状是中间档：**可以跑，但永远要逐次确认**。
+
+没有这一层，`--approve execute_local` 会悄悄变成「无人值守地跑任意代码」——那不是任何人在批准一个**效果类别**时想表达的意思。有了它，`--yes` 批准的是一类效果，而不是碰巧落在那一类里的每一次调用。
+
+配套的还有 **惰性参数豁免**：如果命令后的每个参数都是 `--version` / `-h` 这类，就不问。`python3 --version` 只会报个版本号然后退出，为它弹窗会教会用户「这个提示是噪音」——**而一个让人关掉的护栏什么都保护不了**。豁免故意做得很窄：必须**所有**参数都惰性，所以 `python3 -h script.py` 照样问。
 
 ### 1. 文件检查点与回退（来自 Gemini CLI 的 checkpoint 思路）
 
@@ -672,6 +699,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 - 日志与**产物**都过脱敏（外置 200KB 工具输出这件事，如果不过脱敏等于把刚 `cat` 的 key 落盘）。
 - `.env`、`~/.ssh/**`、`*.pem`、`~/.aws/**` 等即使在 `READ_ONLY` 也拒绝（`.env.example` 等模板除外）。
 - `run_command` 永远 `shell=False`，参数经 `shlex.split` 后作为 argv 执行。
+- **命令判定分三层，且读的是参数不只是命令名**：deny 模式（原文）→ forbidden 前缀 / flag（argv）→ sticky CONFIRM（argv）→ allowlist（命令名）。`git config core.hooksPath` 能写 `.git/config`（也就是文件围栏钉不住它，因为 git 自己写），`python3 -c` 与 `python3 刚写的脚本` 都是任意代码——所以「允许 python3」被拆成了「可以跑，但永远要问」。这一层 `--yes` 压不掉。
 - `http_get`/`http_post` 的重定向**逐跳**复检白名单 —— 一个被允许的主机 302 到 `evil.example` 不会被静默跟随。
 - 沙箱：第一版用「路径围栏 + 命令白名单 + 环境脱敏」，**没有** Docker。Docker 每条命令 3 秒起的开销不值得，第二版做成可插拔。
 - **A2A 出站请求三重防线**：scheme 必须是 http/https → host 必须在 `a2a.allow_hosts`（默认空 = 谁也不调）→ **解析后的地址必须是公网**（`127.0.0.1` / `169.254.169.254` / `10.x` / `::1` 全拦）。第三条是经典的绕过，也是最常被跳过的检查。重定向逐跳复检，**卡片自己的 `url` 也要过检查**——有效的卡片不等于可信的卡片。
@@ -711,7 +739,7 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 658 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 702 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -805,16 +833,20 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 
 | 缺口 | 为什么危险 |
 |---|---|
-| **`.git/hooks` 可写** | agent 没有 shell 元字符、每条命令过白名单、每个效果等级都被闸门管着——**然后它写了 `.git/hooks/pre-commit`**，之后任何一次 `git commit`（任何人、任何时间）都会执行它。审批闸门全程没参与：代码在**之后**执行，在所有检查之外。`.git/config` 是另一扇同样的门（`core.hooksPath` / `core.pager` / `credential.helper` / `alias.*`） |
+| **`.git/hooks` 可写**（已修，但修得不完整——见下一条） | agent 没有 shell 元字符、每条命令过白名单、每个效果等级都被闸门管着——**然后它写了 `.git/hooks/pre-commit`**，之后任何一次 `git commit`（任何人、任何时间）都会执行它。审批闸门全程没参与：代码在**之后**执行，在所有检查之外。`.git/config` 是另一扇同样的门（`core.hooksPath` / `core.pager` / `credential.helper` / `alias.*`） |
 | **没有文件回退** | 运行时能把状态回放到任意一步，却回不了文件。它清楚知道是哪一步毁掉的工作区，**但放不回去** |
 | **`apply_patch` 顺序相关** | 依次替换看着等价于对原文解析，实际会让后一条编辑匹配到前一条刚插入的文本——**模型的意图被静默反转**，文件看起来被编辑过而且是错的 |
 | **旧条目被整条丢弃** | 把旧工具结果压成更小的正文仍然花 token；预算耗尽时最老的条目整条消失，于是模型失去「我做过什么」的记录，会重跑那些它已经看不到结果的调用 |
 | **记忆允许被模型隐藏** | curator 让模型判 `add/update/duplicate/none`，`update` 会把旧记忆**从检索里隐藏**。「这条取代那条」没有可靠先验（互补 ≠ 矛盾），判错就是**一条事实静默永久地消失** |
+| **上一轮对 `.git/hooks` 的修复不完整** | 文件围栏钉住了 `.git/config` 这个**路径**，但 `git config core.hooksPath /tmp/evil` 是 **git 自己**去写它——围栏看不见命令内部的写入。同一个执行向量，换了一扇门。**修一个洞之后要问「还有别的门通向这里吗」** |
+| **命令白名单按命令名匹配** | `head == basename(entry)` 意味着「允许 `python3`」等于「允许一切」。`python3 -c "..."` 当时被挡住**只因为 `(` 是元字符**——偶然挡住，不是设计挡住；有人为别的需求打开 `allow_metacharacters` 就没了 |
 
 **带走的经验（续）：**
 
 9. **对标不是列功能表，是找「它解决的那个具体失败模式」。** 上面五条没有一条是「别人有我没有」的功能——`apply_patch` 我也有，只是形状错了。**问「他们为什么这样做」比问「他们做了什么」有用得多。**
 10. **同时要明确「哪些差距不该补」。** 渠道适配器、TS SDK、浏览器、repo map、插件市场——这五项按功能表都该补，按「对单机个人 coding agent 的价值」都该跳过，理由写在「与 OpenClaw / Hermes 的关系」一节里。**对齐功能列表本身是一种失败模式。**
+11. **修完一个洞要问「还有别的门通向这里吗」。** 我上一轮把 `.git/config` 按**路径**钉死，却没想过 `git config` 是 git 自己写它——同一个执行向量换了扇门。**按「它是什么」防护会漏掉「谁能写它」**；这类问题要靠「把攻击面按**能力**而不是按**对象**列一遍」才看得出来。
+12. **偶然挡住 ≠ 设计挡住。** `python3 -c "..."` 当时确实被拒，但理由只是 `(` 恰好是元字符。**一个靠副作用成立的防线，会在别的需求改动它依赖的那个条件时静默失效。** 判断一条防护是否可信，要问「它是为什么被挡住的」。
 
 **这一批带走的经验：**
 

@@ -106,7 +106,65 @@ class TestCommandFence:
         guard = CommandGuard(PermissionConfig())
         assert guard.check("pytest -q").allowed
         assert guard.check("git status").allowed
-        assert guard.check("python3 script.py").allowed
+        assert guard.check("ls -la").allowed
+        assert guard.check("rg pattern src/").allowed
+
+    def test_an_interpreter_is_allowed_but_never_unattended(self) -> None:
+        """`python3 script.py` runs whatever was just written.
+
+        So it may run -- the agent needs it -- and it may not run *without
+        being asked*, even when the user has pre-approved command execution.
+        Without this tier, `--approve execute_local` silently means "run
+        arbitrary code unattended", which is not what approving a command
+        class was meant to say.
+        """
+        guard = CommandGuard(PermissionConfig())
+        verdict = guard.check("python3 script.py")
+        assert verdict.needs_confirmation
+        assert verdict.sticky, "a blanket approval must not be able to downgrade it"
+        assert not verdict.denied, "it is still a permitted command"
+
+    def test_the_allowlist_still_carries_the_interpreters(self) -> None:
+        """Removing them would have been the easy fix and the wrong one: the
+        allowlist is a hard deny, not a fallback to asking, so taking
+        `python3` out would block it outright rather than making it prompt."""
+        policy = PermissionConfig()
+        assert "python3" in policy.shell.allow
+
+    @pytest.mark.parametrize(
+        "command",
+        ["python3 --version", "python --version", "node -V", "npm --help"],
+    )
+    def test_an_inert_invocation_does_not_ask(self, command: str) -> None:
+        """`python3 --version` reports a version and stops.
+
+        Asking about it teaches the user that the prompt is noise, and a guard
+        people switch off protects nothing. The exemption is narrow on
+        purpose: *every* argument has to be inert, so `python3 -h script.py`
+        still asks.
+        """
+        assert CommandGuard(PermissionConfig()).check(command).allowed
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python3 script.py",
+            "python3 -h script.py",  # one real argument is enough
+            "python3 --version script.py",
+            "node script.js",
+            "npm test",
+        ],
+    )
+    def test_anything_that_could_run_something_still_asks(self, command: str) -> None:
+        assert CommandGuard(PermissionConfig()).check(command).needs_confirmation
+
+    def test_a_runner_that_is_not_allowlisted_is_denied_not_asked(self) -> None:
+        """Two different outcomes, and the difference matters to a user
+        reading the error: `go -V` is not a command this agent may run at
+        all, so there is nothing to approve."""
+        verdict = CommandGuard(PermissionConfig()).check("go -V")
+        assert verdict.denied
+        assert "allowlist" in verdict.reason
 
     def test_metacharacters_can_be_enabled(self) -> None:
         policy = PermissionConfig()
@@ -114,6 +172,122 @@ class TestCommandFence:
         policy.shell.allow = []
         guard = CommandGuard(policy)
         assert guard.check("echo hello | wc -l").allowed
+
+
+class TestArgumentsAreNotCommands:
+    """The allowlist matches the command *name*; the risk lives in its args.
+
+    `git` is a safe command. `git config core.hooksPath /tmp/evil` writes the
+    file that decides what runs on the next commit -- which is the same
+    execution vector the path fence pins read-only, reached through the tool
+    that owns the file. `python3` is a safe command. `python3 -c "..."` and
+    `python3 script-i-just-wrote.py` are not. An allowlist that only reads the
+    name cannot tell those apart, so these rules read the arguments.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # git's own escape hatches -- these reach .git/config, which the
+            # path fence cannot protect because git writes it itself
+            "git config core.hooksPath /tmp/evil",
+            "git -c core.hooksPath=/tmp/evil status",
+            "git --config-env=x=y status",
+            "git hook run pre-commit",
+            "git submodule add https://x/y",
+            # interpreters running a string
+            "python3 -c \"print(1)\"",
+            "python -c \"print(1)\"",
+            "node -e \"console.log(1)\"",
+            "perl -e 'print 1'",
+            "bash -c 'ls'",
+            "osascript -e 'tell app \"Finder\" to quit'",
+            # commands whose job is to run another command
+            "env FOO=bar ls",
+            "xargs ls",
+            "nohup ls",
+            "watch ls",
+            "sudo ls",
+            # flags that turn an inert command into a runner
+            "find . -name '*.py' -exec rm {} ;",
+            "find . -delete",
+            "tar -xf a.tar --to-command=sh",
+        ],
+    )
+    def test_forbidden_invocations_are_denied(self, command: str) -> None:
+        verdict = CommandGuard(PermissionConfig()).check(command)
+        assert verdict.denied, f"{command!r} should be denied"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git status",
+            "git diff --stat",
+            "git log --oneline -5",
+            "find . -name README.md",
+            "ls -la",
+            "pytest -q",
+            "ruff check .",
+            "cp a b",
+            "mv a b",
+        ],
+    )
+    def test_the_safe_forms_of_the_same_commands_still_run(self, command: str) -> None:
+        """The rules carve out subcommands, they do not ban the command."""
+        assert CommandGuard(PermissionConfig()).check(command).allowed
+
+    def test_the_prefix_match_normalises_the_binary_path(self) -> None:
+        """`/usr/bin/git config ...` is the same invocation."""
+        verdict = CommandGuard(PermissionConfig()).check("/usr/bin/git config user.name x")
+        assert verdict.denied
+
+    def test_extra_whitespace_does_not_slip_past(self) -> None:
+        """Matching on the raw string would miss this; matching on argv does not."""
+        assert CommandGuard(PermissionConfig()).check("git    config  user.name  x").denied
+
+    def test_a_blanket_approval_cannot_unlock_a_forbidden_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        engine = PermissionEngine(
+            PermissionConfig(),
+            workspace=ws,
+            home=tmp_path / "home",
+            cli_approvals=tuple(EffectClass),  # the equivalent of --yes
+        )
+        registry = ToolRegistry()
+        registry.register(RunCommandTool())
+        tool = registry.get("run_command")
+
+        assert engine.decide(
+            tool, {"command": "git config core.hooksPath /tmp/evil"}
+        ).denied
+
+    def test_a_blanket_approval_cannot_make_an_interpreter_unattended(
+        self, tmp_path: Path
+    ) -> None:
+        """The point of the sticky tier: `--yes` approves a *class* of effect,
+        not every invocation that happens to be in it."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        engine = PermissionEngine(
+            PermissionConfig(),
+            workspace=ws,
+            home=tmp_path / "home",
+            cli_approvals=tuple(EffectClass),
+        )
+        registry = ToolRegistry()
+        registry.register(RunCommandTool())
+        tool = registry.get("run_command")
+
+        verdict = engine.decide(tool, {"command": "python3 script.py"})
+        assert verdict.needs_confirmation
+        assert verdict.sticky
+
+        # An ordinary allowlisted command is still pre-approved, so the tier
+        # is narrow rather than a second blanket.
+        assert engine.decide(tool, {"command": "pytest -q"}).allowed
 
 
 class TestEnvScrubbing:
