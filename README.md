@@ -1,5 +1,10 @@
 # unified-ai-agent
 
+[![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
+[![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-209%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
 
 ```bash
