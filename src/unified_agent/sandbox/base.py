@@ -330,46 +330,57 @@ def seatbelt_probe() -> ProbeResult:
 
     if result.returncode == 0:
         return ProbeResult(True, "restrictive profile applied successfully")
+    return ProbeResult(
+        False,
+        describe_probe_failure(
+            returncode=result.returncode,
+            stdout=result.stdout or b"",
+            stderr=result.stderr or b"",
+            nested=environment_fingerprint()["inside_parent_sandbox"],
+        ),
+    )
 
-    # sandbox-exec may report on either stream, and it can die by signal
-    # (SIGABRT) rather than exiting cleanly. Read both and handle both --
-    # a probe that reports "exit -6" tells the user nothing.
-    stdout = (result.stdout or b"").decode("utf-8", errors="replace").strip()
-    stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
-    message = " | ".join(part for part in (stderr, stdout) if part)
+
+def describe_probe_failure(
+    *, returncode: int, stdout: bytes, stderr: bytes, nested: bool
+) -> str:
+    """Explain a failed probe. Pure, so it is testable on any host.
+
+    Extracted because the message *is* the logic here: a signal death was
+    previously reported as "you are inside a sandbox", which asserts a cause
+    the probe had not established. Keeping this inline meant the only way to
+    test it was to run on macOS and actually be sandboxed.
+    """
+    out = (stdout or b"").decode("utf-8", errors="replace").strip()
+    err = (stderr or b"").decode("utf-8", errors="replace").strip()
+    message = " | ".join(part for part in (err, out) if part)
+
     if not message:
-        if result.returncode < 0:
+        if returncode < 0:
             import signal as _signal
 
             try:
-                message = f"killed by {_signal.Signals(-result.returncode).name}"
+                message = f"killed by {_signal.Signals(-returncode).name}"
             except ValueError:
-                message = f"killed by signal {-result.returncode}"
+                message = f"killed by signal {-returncode}"
         else:
-            message = f"exit {result.returncode}"
+            message = f"exit {returncode}"
 
-    # Only claim "you are inside a sandbox" when there is evidence for it.
-    # A signal death was previously folded into the same hint, which asserts a
-    # cause the probe had not established -- and the reader acts on that.
-    nested = "Operation not permitted" in message or environment_fingerprint()[
-        "inside_parent_sandbox"
-    ]
-    if nested:
-        hint = (
+    if nested or "Operation not permitted" in message:
+        return message + (
             " -- this process is already inside a sandbox, and macOS will not "
             "let it install a narrower one. Run `uaa sandbox` from a normal "
             "terminal to verify."
         )
-    elif result.returncode < 0:
-        hint = (
-            " -- sandbox-exec died without a message. That is a refusal, not a "
-            "crash: this macOS build will not install a restrictive profile "
-            "for this process. Run `uaa sandbox` from a normal terminal to "
-            "compare."
+    if returncode < 0:
+        # A signal death with no output is a refusal, not evidence of nesting.
+        return message + (
+            " -- sandbox-exec was refused without a message. That is a refusal "
+            "rather than a crash: this build will not install a restrictive "
+            "profile for this process. Run `uaa sandbox` from a normal terminal "
+            "to compare."
         )
-    else:
-        hint = ""
-    return ProbeResult(False, message + hint)
+    return message
 
 
 class SeatbeltSandbox(Sandbox):
@@ -643,6 +654,7 @@ __all__ = [
     "SPECIFIC_MARKER_PREFIXES",
     "build_sandbox",
     "builtin_profile_probe",
+    "describe_probe_failure",
     "environment_fingerprint",
     "seatbelt_probe",
 ]

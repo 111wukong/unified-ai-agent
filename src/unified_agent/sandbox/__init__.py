@@ -10,6 +10,7 @@ from unified_agent.sandbox.base import (  # noqa: F401
     SeatbeltSandbox,
     build_sandbox,
     builtin_profile_probe,
+    describe_probe_failure,
     environment_fingerprint,
     seatbelt_probe,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "SPECIFIC_MARKER_PREFIXES",
     "build_sandbox",
     "builtin_profile_probe",
+    "describe_probe_failure",
     "environment_fingerprint",
     "seatbelt_probe",
 ]

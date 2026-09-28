@@ -71,49 +71,68 @@ class TestProbeDoesNotOverclaim:
 
     A signal death with no output was previously reported as "you are inside a
     sandbox", which is a guess. The reader acts on the explanation, so a wrong
-    one sends them looking in the wrong place.
+    one sends them looking in the wrong place -- which is exactly what
+    happened when a report came back showing SIGABRT and the hint blamed a
+    nested sandbox nobody had confirmed.
+
+    These test `describe_probe_failure` directly rather than
+    `seatbelt_probe`. The message construction is the part with the logic, and
+    reaching it through the probe would mean the test only runs on macOS --
+    the host-dependent-test mistake this project has already made twice.
     """
 
-    def test_a_signal_death_does_not_claim_a_cause(self, monkeypatch) -> None:  # noqa: ANN001
-        from unified_agent.sandbox import base as sandbox_base
+    def test_a_signal_death_does_not_claim_a_cause(self) -> None:
+        from unified_agent.sandbox import describe_probe_failure
 
-        class Died:
-            returncode = -6  # SIGABRT
-            stdout = b""
-            stderr = b""
-
-        monkeypatch.setattr(sandbox_base.subprocess, "run", lambda *a, **k: Died())
-        monkeypatch.setattr(
-            sandbox_base,
-            "environment_fingerprint",
-            lambda: {"inside_parent_sandbox": False, "sandbox_markers": []},
+        detail = describe_probe_failure(
+            returncode=-6, stdout=b"", stderr=b"", nested=False
         )
-        result = sandbox_base.seatbelt_probe()
-        assert result.ok is False
-        assert "SIGABRT" in result.detail
-        assert "already inside a sandbox" not in result.detail, (
-            "a signal death is not evidence of a nested sandbox"
+        assert "SIGABRT" in detail
+        assert "already inside a sandbox" not in detail
+        assert "refusal" in detail
+
+    def test_a_signal_death_inside_a_known_sandbox_does_say_so(self) -> None:
+        from unified_agent.sandbox import describe_probe_failure
+
+        detail = describe_probe_failure(
+            returncode=-6, stdout=b"", stderr=b"", nested=True
         )
-        assert "refusal, not a crash" in result.detail
+        assert "already inside a sandbox" in detail
 
-    def test_a_signal_death_inside_a_known_sandbox_does_say_so(
-        self, monkeypatch
-    ) -> None:  # noqa: ANN001
-        from unified_agent.sandbox import base as sandbox_base
+    def test_operation_not_permitted_is_enough_on_its_own(self) -> None:
+        """The message is evidence even without the environment markers."""
+        from unified_agent.sandbox import describe_probe_failure
 
-        class Died:
-            returncode = -6
-            stdout = b""
-            stderr = b""
-
-        monkeypatch.setattr(sandbox_base.subprocess, "run", lambda *a, **k: Died())
-        monkeypatch.setattr(
-            sandbox_base,
-            "environment_fingerprint",
-            lambda: {"inside_parent_sandbox": True, "sandbox_markers": ["CODEBUDDY_X"]},
+        detail = describe_probe_failure(
+            returncode=71,
+            stdout=b"",
+            stderr=b"sandbox-exec: sandbox_apply: Operation not permitted",
+            nested=False,
         )
-        result = sandbox_base.seatbelt_probe()
-        assert "already inside a sandbox" in result.detail
+        assert "already inside a sandbox" in detail
+
+    def test_stderr_is_kept_verbatim(self) -> None:
+        from unified_agent.sandbox import describe_probe_failure
+
+        detail = describe_probe_failure(
+            returncode=65, stdout=b"", stderr=b"sandbox-exec: no version specified", nested=False
+        )
+        assert "no version specified" in detail
+
+    def test_stdout_is_used_when_stderr_is_empty(self) -> None:
+        """sandbox-exec does not reliably pick a stream."""
+        from unified_agent.sandbox import describe_probe_failure
+
+        detail = describe_probe_failure(
+            returncode=1, stdout=b"Invalid Iconset", stderr=b"", nested=False
+        )
+        assert "Invalid Iconset" in detail
+
+    def test_a_plain_nonzero_exit_is_reported_as_an_exit(self) -> None:
+        from unified_agent.sandbox import describe_probe_failure
+
+        detail = describe_probe_failure(returncode=3, stdout=b"", stderr=b"", nested=False)
+        assert detail == "exit 3"
 
 
 class TestSeatbeltProfile:
