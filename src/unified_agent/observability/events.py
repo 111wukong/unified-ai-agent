@@ -56,6 +56,17 @@ class EventType(str, Enum):
     MEMORY_WRITTEN = "memory_written"
     MEMORY_SEARCHED = "memory_searched"
     SKILL_LOADED = "skill_loaded"
+
+    # orchestration. A workflow run is a task, so its progress lands in the
+    # same event stream as everything else -- and `uaa task events` shows the
+    # whole run without a second viewer.
+    WORKFLOW_STARTED = "workflow_started"
+    NODE_STARTED = "node_started"
+    NODE_COMPLETED = "node_completed"
+    NODE_FAILED = "node_failed"
+    NODE_SKIPPED = "node_skipped"
+    WORKFLOW_COMPLETED = "workflow_completed"
+    WORKFLOW_FAILED = "workflow_failed"
     SKILL_CANDIDATE = "skill_candidate"
 
 

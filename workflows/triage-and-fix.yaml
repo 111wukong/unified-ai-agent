@@ -1,0 +1,96 @@
+# A workflow is data, and it is checked before it runs: every `{{#node.field#}}`
+# must resolve, every node must be reachable, and the graph must be acyclic.
+# `uaa workflow validate` reports every problem at once, with the location.
+version: "1"
+name: triage-and-fix
+description: >
+  Analyse a repository, decide whether anything needs fixing, and only then
+  run the agent that does the work. The point of the branch is cost: the
+  second agent node is the expensive one, and it does not run when the
+  analysis comes back clean.
+
+# Effects this workflow may perform without prompting. Declared in the file so
+# it is reviewable and diffable, and so the workflow can run unattended.
+# `system_admin` is refused here on purpose -- the HTTP layer refuses to grant
+# it too, and a data file must not be the way around that.
+approvals:
+  - execute_local
+
+inputs:
+  - name: goal
+    type: string
+    required: true
+    default: "find failing tests and fix them"
+
+graph:
+  nodes:
+    - id: start
+      type: start
+      data:
+        title: Input
+        variables:
+          - variable: goal
+            type: string
+            required: true
+          - variable: model
+            type: string
+            default: ""
+
+    - id: analyse
+      type: agent
+      data:
+        title: Analyse the workspace
+        goal: "{{#start.goal#}}"
+        model: "{{#start.model#}}"
+        max_steps: 6
+        error_strategy:
+          retry:
+            enabled: true
+            max_retries: 1
+            delay_seconds: 1
+
+    - id: decide
+      type: ifelse
+      data:
+        title: Anything to fix?
+        branches:
+          - when: "{{#analyse.answer#}} contains nothing"
+            target: report
+        else: fix
+
+    - id: fix
+      type: agent
+      data:
+        title: Do the work
+        goal: |
+          Based on this analysis:
+
+          {{#analyse.answer#}}
+
+          Apply the fixes now.
+        max_steps: 12
+
+    - id: report
+      type: end
+      data:
+        title: Report
+        outputs:
+          verdict: "no action needed"
+          analysis: "{{#analyse.answer#}}"
+
+    - id: done
+      type: end
+      data:
+        title: Done
+        outputs:
+          analysis: "{{#analyse.answer#}}"
+          fix: "{{#fix.answer#}}"
+          steps: "{{#fix.steps#}}"
+
+  edges:
+    - source: start
+      target: analyse
+    - source: analyse
+      target: decide
+    - source: fix
+      target: done

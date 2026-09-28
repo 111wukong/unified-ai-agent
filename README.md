@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-362%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-435%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -189,6 +189,10 @@ src/unified_agent/
 │   ├── mcp.py          MCP stdio 客户端（双协议时代）
 │   ├── memory_tools.py save_memory / search_memory / load_skill / update_plan / finish
 │   └── registry.py
+├── orchestration/
+│   ├── workflow.py     DSL 解析 + 静态校验（DAG、引用、可达性、审批）
+│   ├── expressions.py  `{{#node.field#}}` 解析与条件求值
+│   └── runner.py       执行器：工作流运行本身是一个 task
 ├── memory/
 │   ├── embeddings.py   向量提供方：OpenAI 兼容 / 离线哈希 / 无
 │   ├── vector.py       cosine 检索，sqlite-vec 加速、纯 Python 兜底
@@ -273,6 +277,39 @@ curl -N -X POST http://127.0.0.1:8000/agui \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"分析这个项目"}]}'
 ```
+
+---
+
+## 工作流：加载时就能证明引用不会悬空
+
+```bash
+uaa workflow list                       # 有哪些、各自能不能加载
+uaa workflow validate triage-and-fix    # 一次报出**所有**问题
+uaa workflow show triage-and-fix        # 按执行顺序打印图
+uaa workflow run triage-and-fix -i goal="修复失败的测试"
+```
+
+节点之间**不共享可变状态**，靠显式引用上游输出：`{{#analyse.answer#}}`。这看起来比共享状态更啰嗦，但它换来一件共享状态给不了的东西：**每个引用都能在跑之前检查**。LangGraph 的共享状态里引用错了是运行时 `KeyError`；这里是带位置的加载期错误。
+
+加载期会检查：节点类型已知、必填字段齐全、引用指向存在的节点和**存在的字段**、引用必须指向上游、没有孤立节点（永远不跑且不吭声）、图无环、分支有兜底。
+
+七种节点，不是四十种（Dify 有 40+ 是因为它是可视化搭建器）：
+
+| 节点 | 做什么 |
+|---|---|
+| `start` | 声明输入 |
+| `agent` | 跑一个完整 agent 任务（**是 task，有 `parent_task_id`**） |
+| `tool` | 直接调一个工具，不经过模型 |
+| `code` | 跑一段命令 —— **走 shell 工具，不在进程内执行** |
+| `ifelse` | 条件分支，`when` / `else` |
+| `iteration` | 对列表逐项跑 body 节点，有 `max_items` 上限 |
+| `end` | 声明输出 |
+
+**运行器是既有运行时之上的驱动，不是平行系统。** 一次工作流运行**本身就是一个 task**：所以事件流、预算、取消、A2A 的任务映射全都自动适用，一行都不用重写。`uaa task events <id>` 就能看到 `workflow_started → node_started/node_completed × N → workflow_completed`。
+
+**工作流可以声明自己允许的副作用**（`approvals:` 或节点级 `approve:`）—— 这样它能无人值守运行，而且是可评审、可 diff 的。但 `system_admin` **不允许**由工作流授予：和 HTTP 层拒绝它的理由一样，数据文件不是策略权威。
+
+**`code` 节点为什么不在进程内跑**：Dify 的 code 节点在服务进程里执行。工作流文件是**数据**，数据不该能伸手进运行时的内存。走 `run_command` 意味着沙箱和命令守卫照常生效。
 
 ---
 
@@ -375,7 +412,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 |---|---|
 | Phase 2 | ✅ FastAPI + SSE/WebSocket（AG-UI）、✅ 沙箱（Seatbelt / Docker） |
 | Phase 3 | ✅ 向量记忆与矛盾处理、⏸ 技能审核流程 |
-| Phase 4 | ⏸ YAML 工作流（Dify 形状）、多 Agent（orchestrator-worker）、A2A v1.0 |
+| Phase 4 | ✅ YAML 工作流、⏸ 多 Agent（orchestrator-worker）、⏸ A2A v1.0 |
 | Phase 5 | ✅ Web 控制台（零构建）、⏸ TypeScript SDK、渠道适配器 |
 
 调研与采纳决策见 [`docs/phase2-5-research.md`](docs/phase2-5-research.md)。
@@ -389,7 +426,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 362 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 435 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```

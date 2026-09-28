@@ -40,6 +40,12 @@ app = typer.Typer(
 config_app = typer.Typer(help="Read and write configuration.", no_args_is_help=True)
 task_app = typer.Typer(help="Inspect and resume tasks.", no_args_is_help=True)
 memory_app = typer.Typer(help="Inspect and search memories.", no_args_is_help=True)
+workflow_app = typer.Typer(
+    help="Compose agent runs declaratively. Validated before anything runs.",
+    no_args_is_help=True,
+)
+app.add_typer(workflow_app, name="workflow")
+
 skill_app = typer.Typer(help="Inspect and validate skills.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
 app.add_typer(task_app, name="task")
@@ -1286,6 +1292,212 @@ def desktop(
     if check:
         console.print("[green]ok[/green] server lifecycle works headlessly")
     raise typer.Exit(code)
+
+
+@workflow_app.command("list")
+def workflow_list(
+    directory: Optional[Path] = typer.Option(None, "--dir", help="Defaults to ./workflows"),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """List workflow files and whether each one loads."""
+    from unified_agent.orchestration import WorkflowError, discover, load_workflow
+
+    settings = _settings(home, workspace)
+    root = directory or (settings.workspace / "workflows")
+    paths = discover(root)
+    if not paths:
+        console.print(f"[dim]no workflow files under {escape(str(root))}[/dim]")
+        return
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("workflow")
+    table.add_column("nodes", justify="right")
+    table.add_column("status")
+    table.add_column("path", style="dim")
+    for path in paths:
+        try:
+            workflow = load_workflow(path)
+            status = "[green]ok[/green]"
+            nodes = str(len(workflow.nodes))
+            name = workflow.name
+        except WorkflowError as exc:
+            status = f"[red]{len(exc.problems)} problem(s)[/red]"
+            nodes = "-"
+            name = path.stem
+        table.add_row(name, nodes, status, str(path.relative_to(root)))
+    console.print(table)
+
+
+@workflow_app.command("validate")
+def workflow_validate(
+    target: str = typer.Argument(..., help="A file path or a name under ./workflows"),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Check a workflow without running it.
+
+    Reports *every* problem at once rather than the first: a load-time error
+    you have to fix one at a time is a load-time error you stop using.
+    """
+    from unified_agent.orchestration import WorkflowError, load_workflow
+
+    settings = _settings(home, workspace)
+    path = _workflow_path(target, settings)
+    if path is None or not path.is_file():
+        err_console.print(f"no workflow at {escape(target)}")
+        raise typer.Exit(1)
+
+    try:
+        workflow = load_workflow(path)
+    except WorkflowError as exc:
+        err_console.print(f"[red]invalid[/red] {escape(str(path))}")
+        for problem in exc.problems:
+            console.print(f"  {escape(problem.render())}")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]valid[/green] {escape(str(path))}")
+    console.print(escape(workflow.describe()), markup=False)
+    raise typer.Exit(0)
+
+
+@workflow_app.command("show")
+def workflow_show(
+    target: str = typer.Argument(...),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Print a workflow's graph: nodes in execution order and their wiring."""
+    from unified_agent.orchestration import WorkflowError, load_workflow
+
+    settings = _settings(home, workspace)
+    path = _workflow_path(target, settings)
+    if path is None or not path.is_file():
+        err_console.print(f"no workflow at {escape(target)}")
+        raise typer.Exit(1)
+    try:
+        workflow = load_workflow(path)
+    except WorkflowError as exc:
+        for problem in exc.problems:
+            console.print(f"  {escape(problem.render())}")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[bold]{escape(workflow.name)}[/bold] [dim]{escape(str(path))}[/dim]")
+    if workflow.description:
+        console.print(escape(workflow.description.strip()), markup=False)
+    console.print()
+
+    for node_id in workflow.topological_order():
+        node = workflow.nodes[node_id]
+        console.print(f"[bold]{escape(node_id)}[/bold]  [dim]{node.type.value}[/dim]")
+        if node.title:
+            console.print(f"    {escape(node.title)}")
+        for field_name in ("goal", "tool", "code", "over"):
+            if node.data.get(field_name):
+                preview = str(node.data[field_name]).strip().splitlines()[0][:90]
+                console.print(f"    {field_name}: {escape(preview)}")
+        if node.type.value == "ifelse":
+            for branch in node.data.get("branches") or []:
+                console.print(
+                    f"    when {escape(str(branch.get('when')))} -> "
+                    f"{escape(str(branch.get('target')))}"
+                )
+            if node.data.get("else"):
+                console.print(f"    else -> {escape(str(node.data['else']))}")
+        for successor in workflow.successors(node_id):
+            console.print(f"    [dim]-> {escape(successor)}[/dim]")
+        console.print()
+
+
+@workflow_app.command("run")
+def workflow_run(
+    target: str = typer.Argument(...),
+    inputs: Optional[list[str]] = typer.Option(
+        None, "--input", "-i", help="key=value, repeatable"
+    ),
+    model: Optional[str] = typer.Option(None, "--model"),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Run a workflow. A run is a task, so `uaa task events <id>` shows it."""
+    from unified_agent.orchestration import (
+        WorkflowError,
+        WorkflowRunner,
+        load_workflow,
+    )
+
+    settings = _settings(home, workspace)
+    path = _workflow_path(target, settings)
+    if path is None or not path.is_file():
+        err_console.print(f"no workflow at {escape(target)}")
+        raise typer.Exit(1)
+    try:
+        workflow = load_workflow(path)
+    except WorkflowError as exc:
+        err_console.print("[red]the workflow does not load:[/red]")
+        for problem in exc.problems:
+            console.print(f"  {escape(problem.render())}")
+        raise typer.Exit(1) from exc
+
+    resolved: dict[str, Any] = {}
+    for item in inputs or []:
+        key, _, value = item.partition("=")
+        if not key:
+            err_console.print(f"bad --input {escape(item)!r}; expected key=value")
+            raise typer.Exit(2)
+        resolved[key.strip()] = value
+
+    missing = [
+        str(spec["name"])
+        for spec in workflow.inputs
+        if spec.get("required") and not spec.get("default") and str(spec["name"]) not in resolved
+    ]
+    if missing:
+        err_console.print(f"missing required input(s): {', '.join(missing)}")
+        raise typer.Exit(2)
+
+    async def _run() -> Any:
+        agent = await build_agent(settings=settings, on_progress=_progress_printer(quiet=False))
+        try:
+            runner = WorkflowRunner(agent=agent, on_progress=_progress_printer(quiet=False))
+            return await runner.run(workflow, inputs=resolved, model_alias=model)
+        finally:
+            agent.close()
+
+    result = asyncio.run(_run())
+    console.print()
+    style = "green" if result.completed else "red"
+    console.print(f"[bold {style}]{escape(result.status)}[/bold {style}]")
+    console.print(escape(result.summary()), markup=False)
+    console.print(f"[dim]task={result.task_id}  {result.duration_s:.1f}s[/dim]")
+
+    if not result.completed:
+        # Say exactly which node failed and why. A run that reports failure
+        # without a reason is a run the user has to debug by reading the DB.
+        for node in result.failures():
+            err_console.print(f"[red]{escape(node.node_id)}[/red] {escape(node.error[:400])}")
+        if result.error and not result.failures():
+            err_console.print(escape(result.error[:400]))
+    if result.outputs:
+        console.print()
+        console.print("[bold]outputs[/bold]")
+        for key, value in result.outputs.items():
+            console.print(f"  {escape(str(key))}: {escape(str(value)[:400])}")
+    raise typer.Exit(0 if result.completed else 1)
+
+
+def _workflow_path(target: str, settings: Any) -> Optional[Path]:
+    """Accept either a path or a bare name resolved under ./workflows."""
+    candidate = Path(target).expanduser()
+    if candidate.is_file():
+        return candidate
+    root = Path(settings.workspace) / "workflows"
+    for suffix in (".yaml", ".yml"):
+        named = root / f"{target}{suffix}"
+        if named.is_file():
+            return named
+    direct = root / target
+    return direct if direct.is_file() else None
 
 
 # ---------------------------------------------------------------------------

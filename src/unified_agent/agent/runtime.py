@@ -109,6 +109,7 @@ class AgentRuntime:
         approved_effects: list[EffectClass] | None = None,
         max_steps: int | None = None,
         task_id: str | None = None,
+        parent_task_id: str | None = None,
     ) -> AgentResult:
         """`task_id` lets a caller subscribe to the event stream *before* the
         task exists. Without it the SSE endpoint races the first events."""
@@ -126,7 +127,11 @@ class AgentRuntime:
             "model": model_alias or self.settings.default_model,
         }
         task_id = self.store.create_task(
-            session_id=session_id, goal=goal, budgets=budgets, task_id=task_id
+            session_id=session_id,
+            goal=goal,
+            budgets=budgets,
+            task_id=task_id,
+            parent_task_id=parent_task_id,
         )
         state = AgentState(
             task_id=task_id,

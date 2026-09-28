@@ -87,6 +87,10 @@ jobs:
           uaa sandbox
           uaa desktop --check
           uaa skill validate skills/code-review
+          uaa workflow list
+          uaa workflow validate triage-and-fix
+          uaa workflow list
+          uaa workflow validate triage-and-fix
 
       - name: Service smoke
         # Boot the real server and drive the AG-UI stream over HTTP.

@@ -193,18 +193,25 @@ class Store:
         goal: str,
         budgets: dict[str, Any] | None = None,
         task_id: str | None = None,
+        parent_task_id: str | None = None,
     ) -> str:
         tid = task_id or new_id("task")
         ts = now_iso()
         with self._lock:
             self.conn.execute(
-                "INSERT INTO tasks(id,session_id,goal,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                (tid, session_id, goal, "pending", ts, ts),
+                "INSERT INTO tasks(id,session_id,parent_task_id,goal,status,created_at,"
+                "updated_at) VALUES(?,?,?,?,?,?,?)",
+                (tid, session_id, parent_task_id, goal, "pending", ts, ts),
             )
         self.append(
             tid,
             EventType.TASK_CREATED,
-            {"session_id": session_id, "goal": goal, "budgets": budgets or {}},
+            {
+                "session_id": session_id,
+                "goal": goal,
+                "budgets": budgets or {},
+                "parent_task_id": parent_task_id,
+            },
         )
         return tid
 
@@ -212,18 +219,27 @@ class Store:
         row = self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return dict(row) if row else None
 
+    def list_children(self, parent_task_id: str) -> list[dict[str, Any]]:
+        """Tasks a workflow node started, so a run's tree is walkable."""
+        rows = self.conn.execute(
+            "SELECT * FROM tasks WHERE parent_task_id=? ORDER BY created_at ASC, rowid ASC",
+            (parent_task_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def list_tasks(self, *, session_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         if session_id:
             rows = self.conn.execute(
-                "SELECT id,session_id,goal,status,steps_used,tokens_in,tokens_out,cost_usd,"
-                "created_at,updated_at FROM tasks WHERE session_id=? "
+                "SELECT id,session_id,parent_task_id,goal,status,steps_used,tokens_in,"
+                "tokens_out,cost_usd,created_at,updated_at FROM tasks WHERE session_id=? "
                 "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (session_id, limit),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT id,session_id,goal,status,steps_used,tokens_in,tokens_out,cost_usd,"
-                "created_at,updated_at FROM tasks ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                "SELECT id,session_id,parent_task_id,goal,status,steps_used,tokens_in,"
+                "tokens_out,cost_usd,created_at,updated_at FROM tasks"
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]

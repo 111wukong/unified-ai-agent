@@ -25,7 +25,7 @@ import contextlib
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _DDL = """
 PRAGMA journal_mode=WAL;
@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS tasks (
     id                   TEXT PRIMARY KEY,
     session_id           TEXT NOT NULL,
+    -- Set when a workflow node started this task. A workflow run is itself a
+    -- task, so `uaa task show` can list what it spawned instead of the inner
+    -- runs looking like unrelated top-level tasks.
+    parent_task_id       TEXT,
     goal                 TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'pending',
     version              INTEGER NOT NULL DEFAULT 0,
