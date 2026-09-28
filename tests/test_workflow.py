@@ -23,6 +23,7 @@ from unified_agent.orchestration import (
     parse_workflow,
     resolve,
 )
+from unified_agent.observability.events import EventType
 
 MINIMAL = """
 version: "1"
@@ -718,6 +719,37 @@ class TestExecution:
         assert result.completed, result.error
         assert result.outputs["picked"] == "no"
         assert "yes" not in result.nodes, "the untaken branch ran"
+
+    def test_the_untaken_branch_is_still_reported(self, runner) -> None:  # noqa: ANN001
+        """Not running is a fact worth recording.
+
+        `result.nodes` deliberately holds only nodes that ran, so on its own
+        it cannot tell "this branch was not taken" from "this node does not
+        exist" -- and the untaken branch is the first place an author looks
+        when a workflow does not do what they meant.
+        """
+        engine, agent = runner([{"content": "nothing to report"}])
+        result = asyncio.run(engine.run(load(BRANCHY)))
+
+        skipped = [
+            e for e in agent.store.events(result.task_id) if e.type is EventType.NODE_SKIPPED
+        ]
+        assert [e.payload["node"] for e in skipped] == ["yes"]
+        assert skipped[0].payload["reason"] == "not reached"
+
+        # The taken branch is not reported as skipped.
+        assert "no" not in [e.payload["node"] for e in skipped]
+
+    def test_a_node_that_ran_is_never_reported_as_skipped(self, runner) -> None:  # noqa: ANN001
+        engine, agent = runner([{"content": "all good"}])
+        result = asyncio.run(engine.run(load(BRANCHY)))
+
+        skipped = [
+            e.payload["node"]
+            for e in agent.store.events(result.task_id)
+            if e.type is EventType.NODE_SKIPPED
+        ]
+        assert skipped == ["no"]
 
     def test_a_tool_node_runs_without_a_model(self, runner) -> None:  # noqa: ANN001
         workflow = load(

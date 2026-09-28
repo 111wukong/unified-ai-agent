@@ -102,6 +102,10 @@ class AgUiRunInput(BaseModel):
     max_steps: int | None = None
 
 
+class SkillPromotion(BaseModel):
+    status: Literal["candidate", "validated", "approved", "active", "deprecated"]
+
+
 # ---------------------------------------------------------------------------
 # app
 # ---------------------------------------------------------------------------
@@ -320,6 +324,28 @@ def create_app(
     @app.get("/api/v1/skills")
     async def list_skills() -> list[dict[str, Any]]:
         return svc.a.store.list_skills()
+
+    @app.post("/api/v1/skills/{name}/promote")
+    async def promote_skill(name: str, payload: SkillPromotion) -> dict[str, Any]:
+        """Move a skill one rung up the ladder.
+
+        Exposed over HTTP because the ladder is the safety mechanism, and a
+        safety mechanism reachable only from the terminal is one that gets
+        bypassed -- by editing the database, or by moving files around.
+        """
+        try:
+            skill = svc.a.skills.promote(name, payload.status)
+        except Exception as exc:  # noqa: BLE001 - SkillError and unknown-name alike
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "name": skill.name,
+            "status": skill.status,
+            "source": skill.source,
+        }
+
+    @app.get("/api/v1/skills/runs")
+    async def skill_runs(name: str | None = None) -> list[dict[str, Any]]:
+        return svc.a.store.list_skill_runs(skill_name=name)
 
     @app.get("/api/v1/memory")
     async def list_memory(scope: str | None = None, limit: int = 50) -> list[dict[str, Any]]:

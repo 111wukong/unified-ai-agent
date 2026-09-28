@@ -318,3 +318,245 @@ class TestBundledSkills:
         assert result.errors == [], f"shipped skills are invalid: {result.errors}"
         assert len(result.loaded) >= 2
         assert all(not r.blocked for r in result.reports)
+
+
+class TestCandidateRoot:
+    """The agent's own output has to be visible *and* unrunnable.
+
+    Both halves are load-bearing. Scanning the candidate root is what gives
+    the human gate something to gate -- before this, a generated skill was
+    written to disk and then invisible to every command. Not honouring the
+    file's own status claim is what keeps the gate shut.
+    """
+
+    def test_a_candidate_is_discovered_but_not_runnable(self, tmp_path: Path) -> None:
+        authored = tmp_path / "skills"
+        candidates = tmp_path / "skills-candidates"
+        write_skill(authored, "shipped", "name: shipped\ndescription: A shipped skill.\n")
+        write_skill(
+            candidates,
+            "invented",
+            "name: invented\ndescription: A skill the agent wrote for itself.\n",
+        )
+
+        registry = SkillRegistry([authored], candidate_dirs=[candidates])
+        result = registry.discover()
+
+        assert sorted(s.name for s in result.loaded) == ["invented", "shipped"]
+        assert registry.get("invented").status == "candidate"
+        assert registry.is_candidate("invented")
+        assert registry.names() == ["shipped"], "a candidate must not reach the prompt index"
+        assert "invented" not in registry.index_prompt()
+
+    def test_a_candidate_cannot_promote_itself(self, tmp_path: Path) -> None:
+        """The candidate root is the one directory an agent can write to.
+
+        A file there declaring `status: active` must not become active, or
+        the whole ladder is decorative -- the agent simply writes the status
+        it wants.
+        """
+        candidates = tmp_path / "skills-candidates"
+        write_skill(
+            candidates,
+            "climber",
+            "name: climber\ndescription: Claims to be active already.\n"
+            "metadata:\n  status: active\n",
+        )
+
+        registry = SkillRegistry([], candidate_dirs=[candidates])
+        registry.discover()
+
+        assert registry.get("climber").status == "candidate"
+        assert registry.active() == []
+
+    def test_a_stored_status_outranks_the_directory_default(self, tmp_path: Path) -> None:
+        """Promotion has to survive the process that made it.
+
+        The default for the candidate root is `candidate`; the stored row is
+        the only thing that can move a skill off it.
+        """
+        candidates = tmp_path / "skills-candidates"
+        write_skill(candidates, "promoted", "name: promoted\ndescription: Already reviewed.\n")
+
+        registry = SkillRegistry(
+            [], candidate_dirs=[candidates], status_overrides={"promoted": "active"}
+        )
+        registry.discover()
+
+        assert registry.get("promoted").status == "active"
+        assert registry.names() == ["promoted"]
+
+    def test_an_authored_skill_may_declare_its_own_status(self, tmp_path: Path) -> None:
+        """Outside the candidate root the file is the author's, so it may say
+        `deprecated` -- retiring by editing a file should work."""
+        authored = tmp_path / "skills"
+        write_skill(
+            authored,
+            "retired",
+            "name: retired\ndescription: Kept around but not in use.\n"
+            "metadata:\n  status: deprecated\n",
+        )
+
+        registry = SkillRegistry([authored])
+        registry.discover()
+
+        assert registry.get("retired").status == "deprecated"
+        assert registry.active() == []
+
+    def test_a_nonsense_declared_status_falls_back_to_active(self, tmp_path: Path) -> None:
+        authored = tmp_path / "skills"
+        write_skill(
+            authored,
+            "confused",
+            "name: confused\ndescription: Declares a status that is not real.\n"
+            "metadata:\n  status: super-active\n",
+        )
+
+        registry = SkillRegistry([authored])
+        registry.discover()
+
+        assert registry.get("confused").status == "active"
+
+    def test_promotion_is_handed_to_the_persister(self, tmp_path: Path) -> None:
+        """`promote` must announce the new status.
+
+        Without this the ladder is a local variable and resets on the next
+        process -- which is exactly how it behaved before.
+        """
+        candidates = tmp_path / "skills-candidates"
+        write_skill(candidates, "climber", "name: climber\ndescription: Something useful.\n")
+        seen: list[tuple[str, str]] = []
+
+        registry = SkillRegistry(
+            [],
+            candidate_dirs=[candidates],
+            on_promote=lambda skill: seen.append((skill.name, skill.status)),
+        )
+        registry.discover()
+
+        registry.promote("climber", "validated")
+        registry.promote("climber", "approved")
+        registry.promote("climber", "active")
+
+        assert seen == [
+            ("climber", "validated"),
+            ("climber", "approved"),
+            ("climber", "active"),
+        ]
+
+    def test_pending_review_is_ordered_by_how_far_along_it_is(self, tmp_path: Path) -> None:
+        candidates = tmp_path / "skills-candidates"
+        authored = tmp_path / "skills"
+        for name in ("early", "late"):
+            write_skill(candidates, name, f"name: {name}\ndescription: Needs review.\n")
+        write_skill(
+            authored,
+            "retired",
+            "name: retired\ndescription: Retired on purpose.\n"
+            "metadata:\n  status: deprecated\n",
+        )
+
+        registry = SkillRegistry(
+            [authored],
+            candidate_dirs=[candidates],
+            status_overrides={"late": "approved"},
+        )
+        registry.discover()
+
+        # Closest to runnable first, so a nearly-finished review gets finished.
+        # `deprecated` is absent: retiring is a decision already taken.
+        assert [s.name for s in registry.pending_review()] == ["late", "early"]
+
+
+class TestStoredLadder:
+    """The ladder, persisted. A promotion that does not outlive its process
+    is not a promotion."""
+
+    def test_a_promotion_survives_a_new_registry(self, tmp_path: Path) -> None:
+        from unified_agent.storage.store import Store
+
+        candidates = tmp_path / "skills-candidates"
+        write_skill(candidates, "climber", "name: climber\ndescription: Something useful.\n")
+        store = Store(tmp_path / "uaa.db")
+        try:
+            first = SkillRegistry(
+                [],
+                candidate_dirs=[candidates],
+                status_overrides=store.skill_statuses(),
+                on_promote=lambda skill: store.upsert_skill(
+                    name=skill.name,
+                    path=str(skill.path),
+                    description=skill.description,
+                    source=skill.source,
+                    status=skill.status,
+                    allowed_tools="",
+                    sha256=skill.sha256,
+                ),
+            )
+            first.discover()
+            assert first.get("climber").status == "candidate"
+            first.promote("climber", "validated")
+
+            # A brand new registry, as a new process would build.
+            second = SkillRegistry(
+                [], candidate_dirs=[candidates], status_overrides=store.skill_statuses()
+            )
+            second.discover()
+        finally:
+            store.close()
+
+        assert second.get("climber").status == "validated"
+
+    def test_promoting_an_unseen_skill_creates_its_row(self, tmp_path: Path) -> None:
+        """An `UPDATE` against a missing row succeeds and changes nothing.
+
+        A freshly written candidate has no row until something writes one, so
+        the persist path has to upsert -- otherwise the first promotion of
+        every skill silently does nothing.
+        """
+        from unified_agent.storage.store import Store
+
+        candidates = tmp_path / "skills-candidates"
+        write_skill(candidates, "fresh", "name: fresh\ndescription: Just written.\n")
+        store = Store(tmp_path / "uaa.db")
+        try:
+            registry = SkillRegistry(
+                [],
+                candidate_dirs=[candidates],
+                on_promote=lambda skill: store.upsert_skill(
+                    name=skill.name,
+                    path=str(skill.path),
+                    description=skill.description,
+                    source=skill.source,
+                    status=skill.status,
+                    allowed_tools="",
+                    sha256=skill.sha256,
+                ),
+            )
+            registry.discover()
+            registry.promote("fresh", "validated")
+            stored = store.skill_statuses()
+        finally:
+            store.close()
+
+        assert stored.get("fresh") == "validated"
+
+    def test_skill_runs_are_readable_and_grouped(self, tmp_path: Path) -> None:
+        """The evidence half of the loop. `skill_runs` was a write-only table
+        while the schema promised it answered "does this skill ever help?"."""
+        from unified_agent.storage.store import Store
+
+        store = Store(tmp_path / "uaa.db")
+        try:
+            store.record_skill_run(skill_name="reviewer", task_id="t1", outcome="completed")
+            store.record_skill_run(skill_name="reviewer", task_id="t2", outcome="failed")
+            store.record_skill_run(skill_name="other", task_id="t3", outcome="completed")
+
+            runs = store.list_skill_runs(skill_name="reviewer")
+            counts = store.skill_run_counts()
+        finally:
+            store.close()
+
+        assert [r["task_id"] for r in runs] == ["t2", "t1"], "newest first"
+        assert counts["reviewer"] == {"completed": 1, "failed": 1}
+        assert counts["other"] == {"completed": 1}

@@ -262,6 +262,25 @@ class WorkflowRunner:
             result.status = "failed"
             result.error = f"{type(exc).__name__}: {exc}"
 
+        # Every declared node that never ran gets an explicit event. Without it
+        # the event stream cannot tell "this branch was not taken" from "this
+        # node does not exist" -- and the untaken branch is the first place an
+        # author looks when a workflow does not do what they meant.
+        #
+        # Deliberately *not* added to `result.nodes`: that mapping means "the
+        # result of a node that ran", and a node that never ran has no result.
+        # The untaken-branch case is already load-bearing for output merging
+        # (see `_collect_outputs`), so widening it here would trade one
+        # ambiguity for a worse one.
+        for node_id, node in workflow.nodes.items():
+            if node_id in result.nodes:
+                continue
+            store.append(
+                run_task,
+                EventType.NODE_SKIPPED,
+                {"node": node_id, "type": node.type.value, "reason": "not reached"},
+            )
+
         result.duration_s = time.monotonic() - started
         store.append(
             run_task, EventType.STATE_TRANSITION, {"from": "running", "to": result.status}

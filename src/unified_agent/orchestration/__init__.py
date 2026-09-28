@@ -17,6 +17,12 @@ from unified_agent.orchestration.expressions import (
     resolve,
     resolve_deep,
 )
+from unified_agent.orchestration.multi_agent import (
+    AgentDeps,
+    MultiAgentRunner,
+    SubAgentOutcome,
+    SubAgentTask,
+)
 from unified_agent.orchestration.runner import (
     NodeResult,
     WorkflowResult,
@@ -37,13 +43,17 @@ from unified_agent.orchestration.workflow import (
 )
 
 __all__ = [
+    "AgentDeps",
     "Edge",
     "ErrorStrategy",
     "ExpressionError",
+    "MultiAgentRunner",
     "Node",
     "NodeResult",
     "NodeType",
     "Problem",
+    "SubAgentOutcome",
+    "SubAgentTask",
     "Workflow",
     "WorkflowError",
     "WorkflowResult",

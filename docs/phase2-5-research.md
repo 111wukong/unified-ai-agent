@@ -387,7 +387,8 @@ SUBMITTED → WORKING → INPUT_REQUIRED / AUTH_REQUIRED
 | Web 控制台 | ✅ | `api/console/`，零构建原生 JS，直接消费 AG-UI |
 | 向量记忆 + 矛盾处理 | ✅ | `memory/`：三层（FTS5 / 向量 / curator），sqlite-vec 只当加速器 |
 | YAML 工作流 | ✅ | `orchestration/`：七种节点 + 静态校验 + 运行器（工作流运行本身是一个 task） |
-| 多 Agent | ⏸ | 设计已定（orchestrator-worker + 规模规则 + 预算闸门），未实现 |
+| **多 Agent** | ✅ | `orchestration/multi_agent.py` + `tools/multi_agent.py`：orchestrator-worker，默认关闭，硬上限 + 契约校验 + 报告落盘 |
+| 技能审核流程 | ✅ | `skills/registry.py`：候选目录纳入扫描、状态持久化到 DB、`uaa skill promote/review/runs` + `POST /api/v1/skills/{name}/promote` |
 | A2A v1.0 | ⏸ | 设计已定（Agent Card + JSON-RPC + SSE + webhook SSRF 防护），未实现 |
 
 ### 实施中发现的三条修正
@@ -415,3 +416,24 @@ SUBMITTED → WORKING → INPUT_REQUIRED / AUTH_REQUIRED
 6. **模型回退要在解析之后做。** `model: "{{#start.model#}}"` 解析成空串时应该回退到运行级模型；在解析前回退的话，模板字符串本身算「已指定」，空结果就静默胜出。
 
 另外：**工作流文件可以声明自己允许的副作用**（`approvals:` / 节点级 `approve:`），这样它能在无人值守下运行，而且是可评审、可 diff 的。但 `system_admin` **不允许**由工作流授予 —— 和 HTTP 层拒绝它的理由一样：数据文件不是策略权威。
+
+
+### 多 Agent 实施中的五条修正
+
+1. **`delegate` 的效果等级必须是它能授予的**最强**效果。** 子 Agent 的允许效果是可配的；如果工具自己声明 `read_only`，那么有人把 `allowed_effects` 调成 `execute_local` 之后，委派本身仍然不需要审批 —— 一个能悄悄发出比它声明的更多权限的工具，会让整个效果等级体系变成装饰。取 `max(effect.rank)`。
+2. **`system_admin` 不允许由配置文件授予。** 理由和工作流审批层、HTTP 层完全一致：TOML 是数据文件，不是策略权威；而且子 Agent 是无人值守运行的。`check()` 直接拒绝。
+3. **工具在关闭时是「缺席」而不是「拒绝」。** 列在提示词里但调用永远失败的工具，代价是一次白花的模型调用，外加教会模型「工具目录会骗人」。`build_multi_agent_tools` 在 `enabled=False` 时返回空列表。
+4. **`minLength` 不是具体性检查。** 最初给三个必填字段加了长度下限，结果 `output_format = "a list"` 被判非法 —— 而模型能做的只是往字符串里灌字符凑长度，简报并不会因此变好。改成只要求非空，由 `check()` 处理 schema 看不见的「纯空白」。
+5. **子 Agent 不反思。** 五个子 Agent 就是五次额外抽取调用，而编排者本来要对合并结果反思一次。`AgentRuntime.run` 因此多了一个 `reflect` 参数（`None` = 跟随配置）。
+
+另外两条来自实现顺序的观察：
+
+- **子 Agent 必须用按别名分发的模型注册表。** 测试里 `ScriptedModels` 对任何别名返回同一个实例，并发子 Agent 于是共用一份脚本游标、互相吃掉对方的步骤 —— 这正是多 Agent 要避免的共享。生产环境天然没这个问题（每个别名有自己的适配器），但测试替身会引入它。
+- **子 Agent 撞到未授予的效果时会停下来问。** 它不能向用户提问，于是以 `waiting_confirmation` 结束，编排者拿到 `pending_tool` 并转告用户去批准那个子任务。HITL 因此没有被多 Agent 绕开 —— 这是刻意的：绕过它比多花一次审批糟糕得多。
+
+
+### 技能审核流程实施中的三条修正
+
+1. **候选目录必须被扫描，否则「人工闸门」没有可闸之物。** 原设计把候选放在搜索路径之外来保证它不能自动生效 —— 那确实有效，但也让它对所有命令不可见。正确的做法是**扫描它、但让它无法自我提权**：候选目录是 Agent 唯一能写的目录，所以那里的文件无论 frontmatter 自称什么状态，一律按 `candidate` 处理。
+2. **状态优先级：DB 行 > frontmatter > 目录默认值。** DB 行排第一，因为只有 `promote` 会写它，而 `promote` 是人的动作；目录默认值排最后，因为它是「谁写的」推出来的，不是判断出来的。写入侧必须 **upsert 而不是 UPDATE**：一条刚写出的候选还没有行，`UPDATE` 会成功但什么都不改。
+3. **反射必须住在运行时里，不是 CLI 里。** 它原本只在 `uaa run --reflect` 里调用，于是 `POST /agui` 启动的任务永远不写记忆、不产技能候选 —— 一个内核能力只从两个入口里的一个可达。移到 `AgentRuntime` 之后，CLI 只负责**渲染**事件里留下的结果。

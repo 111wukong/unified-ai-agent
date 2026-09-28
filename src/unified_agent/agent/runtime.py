@@ -24,7 +24,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from unified_agent.agent.context import ContextBuilder
-from unified_agent.agent.executor import FINISH_TOOL, PLAN_TOOL, ToolRunner
+from unified_agent.agent.executor import FINISH_TOOL, PLAN_TOOL, SKILL_TOOL, ToolRunner
 from unified_agent.agent.planner import Planner, apply_plan_update
 from unified_agent.agent.state import (
     AgentState,
@@ -110,9 +110,16 @@ class AgentRuntime:
         max_steps: int | None = None,
         task_id: str | None = None,
         parent_task_id: str | None = None,
+        reflect: bool | None = None,
     ) -> AgentResult:
         """`task_id` lets a caller subscribe to the event stream *before* the
-        task exists. Without it the SSE endpoint races the first events."""
+        task exists. Without it the SSE endpoint races the first events.
+
+        `reflect` overrides `agent.reflect` for this run only. Sub-agents pass
+        `False`: a fan-out of five sub-agents would otherwise pay five extra
+        extraction calls, and the orchestrator already reflects once over the
+        combined result.
+        """
         model = self.models.get(model_alias)
         self._model = model
         effects = [e.value for e in (approved_effects or [])]
@@ -149,7 +156,9 @@ class AgentRuntime:
             store=self.store,
             summarizer=self._summarizer or self.models.summarizer(),
         )
-        return await self._drive(state, max_steps=max_steps or self.settings.agent.max_steps)
+        result = await self._drive(state, max_steps=max_steps or self.settings.agent.max_steps)
+        await self._reflect(state, result, enabled=reflect)
+        return result
 
     async def resume(self, task_id: str, *, max_steps: int | None = None) -> AgentResult:
         task = self.store.get_task(task_id)
@@ -216,7 +225,9 @@ class AgentRuntime:
             self._persist(state)
 
         await self._resolve_unfinished_calls(state)
-        return await self._drive(state, max_steps=max_steps or self.settings.agent.max_steps)
+        result = await self._drive(state, max_steps=max_steps or self.settings.agent.max_steps)
+        await self._reflect(state, result)
+        return result
 
     async def approve(self, task_id: str, *, request_id: str | None = None) -> AgentResult:
         state, _ = self._load(task_id)
@@ -299,6 +310,7 @@ class AgentRuntime:
                 state.status = TaskStatus.CANCELLED
                 state.error = "cancelled"
                 self._persist(state)
+                self._record_skill_runs(state)
                 return self._result(state, duration=time.time() - started)
 
             state.steps_used += 1
@@ -312,7 +324,9 @@ class AgentRuntime:
             message_id = f"msg_{uuid.uuid4().hex[:12]}"
             try:
                 resp = await self._call_model(
-                    messages, stream=self._stream_callback(state.task_id, message_id)
+                    state,
+                    messages,
+                    stream=self._stream_callback(state.task_id, message_id),
                 )
             except ModelError as exc:
                 return self._fail(state, f"model call failed: {exc}", started)
@@ -360,8 +374,31 @@ class AgentRuntime:
                     return result
                 continue
             entry = await self._runner.execute(call, state=state, ctx=self._tool_context(state))
+            if call.name == SKILL_TOOL and entry.success:
+                self._note_skill_loaded(entry, state)
             self._progress("tool", {"name": call.name, "success": entry.success})
         return None
+
+    def _note_skill_loaded(self, entry: LogEntry, state: AgentState) -> None:
+        """Record which skills a task actually pulled in.
+
+        `state.loaded_skills` is what the task-end `skill_runs` row is built
+        from, so without this the whole skill-effectiveness signal is empty.
+        """
+        name = str(entry.arguments.get("name") or "").strip()
+        if not name:
+            return
+        if name not in state.loaded_skills:
+            state.loaded_skills.append(name)
+        self.store.append(
+            state.task_id,
+            EventType.SKILL_LOADED,
+            {
+                "name": name,
+                "step_id": entry.step_id,
+                "allowed_tools": (entry.arguments or {}).get("allowed_tools"),
+            },
+        )
 
     async def _apply_plan_tool(self, call: ToolCall, state: AgentState) -> None:
         try:
@@ -438,10 +475,20 @@ class AgentRuntime:
 
         return on_delta
 
-    async def _call_model(self, messages: list, *, stream: Any = None) -> Any:
+    async def _call_model(self, state: AgentState, messages: list, *, stream: Any = None) -> Any:
         model = self._model
         attempts = max(1, self.settings.agent.model_retry_attempts)
         last: ModelError | None = None
+        self.store.append(
+            state.task_id,
+            EventType.MODEL_REQUEST,
+            {
+                "phase": "step",
+                "messages": len(messages),
+                "attempt": 1,
+                "tools": len(self.registry.specs()),
+            },
+        )
         for attempt in range(attempts):
             try:
                 return await model.chat(
@@ -449,9 +496,24 @@ class AgentRuntime:
                 )
             except ModelError as exc:
                 last = exc
+                self.store.append(
+                    state.task_id,
+                    EventType.MODEL_ERROR,
+                    {
+                        "phase": "step",
+                        "attempt": attempt + 1,
+                        "retryable": exc.retryable,
+                        "error": str(exc)[:500],
+                    },
+                )
                 if not exc.retryable or attempt == attempts - 1:
                     raise
                 delay = min(2**attempt, 8)
+                self.store.append(
+                    state.task_id,
+                    EventType.MODEL_RETRY,
+                    {"attempt": attempt + 1, "delay_s": delay, "error": str(exc)[:500]},
+                )
                 self._progress("model_retry", {"attempt": attempt + 1, "error": str(exc)})
                 await asyncio.sleep(delay)
         raise last or ModelError("model call failed")
@@ -536,13 +598,28 @@ class AgentRuntime:
         in the loop the goal is what defines relevance, and embedding a
         changing query every step would make the recalled set flicker.
         """
+        mode = "fts"
         if self.memory is not None:
             try:
                 hits = await self.memory.recall(state.goal[:200], limit=5)
+                mode = "hybrid" if self.memory.embeddings.available else "fts"
             except Exception:  # noqa: BLE001 - recall must never break a task
                 hits = []
         else:
             hits = self.store.search_memories(state.goal[:60], limit=5)
+        # Recorded even when nothing matched: "recall ran and found nothing"
+        # and "recall never ran" are different, and only the event tells them
+        # apart when a task behaves as though it had no context.
+        self.store.append(
+            state.task_id,
+            EventType.MEMORY_SEARCHED,
+            {
+                "query": state.goal[:200],
+                "mode": mode,
+                "hits": len(hits),
+                "ids": [h.get("id") for h in hits],
+            },
+        )
         if not hits:
             return ""
         lines = ["# Recalled memories", ""]
@@ -612,6 +689,7 @@ class AgentRuntime:
             {"answer": answer, "steps": state.steps_used, "usage": state.usage.model_dump()},
         )
         self._persist(state)
+        self._record_skill_runs(state)
         return self._result(state, duration=max(0.0, time.time() - started))
 
     def _fail(self, state: AgentState, error: str, started: float) -> AgentResult:
@@ -619,7 +697,55 @@ class AgentRuntime:
         state.status = TaskStatus.FAILED
         self.store.append(state.task_id, EventType.TASK_FAILED, {"error": error})
         self._persist(state)
+        self._record_skill_runs(state)
         return self._result(state, duration=max(0.0, time.time() - started))
+
+    def _record_skill_runs(self, state: AgentState) -> None:
+        """Attribute the task's outcome to every skill it loaded.
+
+        This is the only feedback loop a skill has: without it `deprecate`
+        is a decision made on vibes, and `skill_runs` stays an empty table
+        that the schema promised would answer "does this skill ever help?".
+        """
+        if not state.loaded_skills:
+            return
+        outcome = state.status.value
+        for name in state.loaded_skills:
+            self.store.record_skill_run(
+                skill_name=name, task_id=state.task_id, outcome=outcome
+            )
+
+    async def _reflect(
+        self, state: AgentState, result: AgentResult, *, enabled: bool | None = None
+    ) -> None:
+        """Post-task learning: one extra model call, at the very end.
+
+        This lives in the runtime rather than in a front end because it is
+        part of the kernel. It used to run only from `uaa run --reflect`, so
+        a task started over HTTP never wrote a memory and never produced a
+        skill candidate -- the learning path existed and was reachable from
+        exactly one of the two entry points.
+        """
+        if enabled is None:
+            enabled = self.settings.agent.reflect
+        if not enabled or result.status != TaskStatus.COMPLETED.value:
+            return
+        from unified_agent.agent.reflector import Reflector
+
+        try:
+            reflector = Reflector(
+                model=self._model,
+                settings=self.settings,
+                store=self.store,
+                memory=self.memory,
+            )
+            if not reflector.worth_running(state):
+                return
+            await reflector.run_and_persist(state)
+        except Exception as exc:  # noqa: BLE001 - learning must never fail a task
+            self._progress(
+                "reflection_failed", {"error": f"{type(exc).__name__}: {exc}"[:300]}
+            )
 
     def _transition(self, state: AgentState, to: TaskStatus) -> None:
         previous = state.status

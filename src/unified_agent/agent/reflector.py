@@ -164,17 +164,41 @@ class Reflector:
             outcome = await self.memory.remember(
                 candidates, scope="project", session_id=state.session_id, source="reflection"
             )
-            for memory_id in outcome.added:
+            # A readable preview rides along with the id. The curator decides
+            # per candidate, so the verdicts are the only place that says what
+            # was actually kept -- and a front end that has to re-read the
+            # memory table to render a one-line "remembered: ..." is a front
+            # end that will just stop rendering it.
+            from unified_agent.memory.extract import Verdict
+
+            added_previews = [
+                d.candidate.content[:120]
+                for d in outcome.decisions
+                if d.verdict is Verdict.ADD
+            ]
+            updated_previews = [
+                d.candidate.content[:120]
+                for d in outcome.decisions
+                if d.verdict is Verdict.UPDATE
+            ]
+            for memory_id, preview in zip(outcome.added, added_previews, strict=False):
                 self.store.append(
                     state.task_id,
                     EventType.MEMORY_WRITTEN,
-                    {"id": memory_id, "verdict": "add"},
+                    {"id": memory_id, "verdict": "add", "preview": preview},
                 )
-            for old_id, new_id in outcome.updated:
+            for (old_id, new_id), preview in zip(
+                outcome.updated, updated_previews, strict=False
+            ):
                 self.store.append(
                     state.task_id,
                     EventType.MEMORY_WRITTEN,
-                    {"id": new_id, "verdict": "update", "superseded": old_id},
+                    {
+                        "id": new_id,
+                        "verdict": "update",
+                        "superseded": old_id,
+                        "preview": preview,
+                    },
                 )
         else:
             for candidate in candidates:
@@ -189,7 +213,12 @@ class Reflector:
                 self.store.append(
                     state.task_id,
                     EventType.MEMORY_WRITTEN,
-                    {"id": memory_id, "verdict": "add", "content": candidate.content},
+                    {
+                        "id": memory_id,
+                        "verdict": "add",
+                        "content": candidate.content,
+                        "preview": candidate.content[:120],
+                    },
                 )
         if reflection.skill_candidate:
             path = self.write_candidate(reflection.skill_candidate, state)

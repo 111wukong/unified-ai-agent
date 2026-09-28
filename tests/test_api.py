@@ -93,6 +93,70 @@ class TestMeta:
         assert {"read_file", "run_command", "git_status", "update_plan"} <= names
 
 
+class TestSkillPromotion:
+    """The ladder is the safety mechanism, so it needs an entry point that is
+    not "edit the database". A gate reachable only from a terminal is a gate
+    that gets worked around."""
+
+    @staticmethod
+    def _write_candidate(settings) -> None:  # noqa: ANN001
+        from tests.test_skills import write_skill
+
+        candidates = settings.home / "skills-candidates"
+        write_skill(
+            candidates,
+            "invented",
+            "name: invented\ndescription: A skill the agent wrote for itself.\n",
+        )
+
+    def test_a_candidate_cannot_jump_the_ladder(self, api, settings) -> None:  # noqa: ANN001
+        self._write_candidate(settings)
+        client = api([])
+        with client:
+            response = client.post(
+                "/api/v1/skills/invented/promote", json={"status": "active"}
+            )
+        assert response.status_code == 400
+        assert "skip" in response.json()["detail"]
+
+    def test_promotion_moves_one_rung_and_persists(self, api, settings) -> None:  # noqa: ANN001
+        self._write_candidate(settings)
+        client = api([])
+        with client:
+            response = client.post(
+                "/api/v1/skills/invented/promote", json={"status": "validated"}
+            )
+            body = response.json()
+            listed = client.get("/api/v1/skills").json()
+
+        assert response.status_code == 200
+        assert body["status"] == "validated"
+        stored = {row["name"]: row["status"] for row in listed}
+        assert stored["invented"] == "validated", "the promotion did not reach the store"
+
+    def test_an_unknown_skill_is_a_client_error(self, api) -> None:
+        client = api([])
+        with client:
+            response = client.post(
+                "/api/v1/skills/nope/promote", json={"status": "validated"}
+            )
+        assert response.status_code == 400
+        assert "unknown skill" in response.json()["detail"]
+
+    def test_an_invalid_status_is_rejected_by_the_schema(self, api) -> None:
+        client = api([])
+        with client:
+            response = client.post(
+                "/api/v1/skills/invented/promote", json={"status": "super-active"}
+            )
+        assert response.status_code == 422
+
+    def test_skill_runs_are_exposed(self, api) -> None:  # noqa: ANN001
+        client = api([])
+        with client:
+            assert client.get("/api/v1/skills/runs").json() == []
+
+
 class TestRestTasks:
     def test_create_and_wait(self, api) -> None:
         client = api(

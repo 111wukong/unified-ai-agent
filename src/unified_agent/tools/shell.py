@@ -22,7 +22,10 @@ from unified_agent.tools.base import Tool, ToolContext, ToolSpec
 from unified_agent.tools.permissions import scrub_env
 from unified_agent.types import EffectClass, ToolResult
 
-_MAX_CAPTURE = 200_000
+# Fallback only. The effective ceiling is `permissions.shell.max_output_bytes`;
+# this constant exists so the tool is still usable when constructed directly
+# (tests, embedding) without a settings object.
+DEFAULT_MAX_CAPTURE = 200_000
 
 _VENV_DIRS = (".venv", "venv", "env")
 
@@ -58,6 +61,7 @@ async def _exec(
     cwd: Path,
     env: dict[str, str],
     timeout_s: float,
+    max_capture: int = DEFAULT_MAX_CAPTURE,
 ) -> tuple[int, str, float]:
     started = time.monotonic()
     proc = await asyncio.create_subprocess_exec(
@@ -78,8 +82,8 @@ async def _exec(
         ) from None
     elapsed = time.monotonic() - started
     text = stdout.decode("utf-8", errors="replace")
-    if len(text) > _MAX_CAPTURE:
-        text = text[:_MAX_CAPTURE] + f"\n[... output cut at {_MAX_CAPTURE} chars]"
+    if len(text) > max_capture:
+        text = text[:max_capture] + f"\n[... output cut at {max_capture} chars]"
     return proc.returncode or 0, text, elapsed
 
 
@@ -114,11 +118,13 @@ class RunCommandTool(Tool):
         default_timeout_s: float = 120.0,
         sandbox: Sandbox | None = None,
         sandbox_mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
+        max_output_bytes: int = DEFAULT_MAX_CAPTURE,
     ):
         self.known_secrets = known_secrets or []
         self.default_timeout_s = default_timeout_s
         self.sandbox = sandbox
         self.sandbox_mode = sandbox_mode
+        self.max_output_bytes = max_output_bytes
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         command = args["command"]
@@ -152,7 +158,13 @@ class RunCommandTool(Tool):
                 argv, workspace=ctx.workspace, mode=self.sandbox_mode, env=env
             )
         try:
-            code, output, elapsed = await _exec(argv, cwd=cwd, env=env, timeout_s=timeout_s)
+            code, output, elapsed = await _exec(
+                argv,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                max_capture=self.max_output_bytes,
+            )
         except ToolError as exc:
             return ToolResult(success=False, error=str(exc), metadata={"argv": argv})
         except FileNotFoundError as exc:
@@ -197,9 +209,13 @@ class RunTestsTool(Tool):
         known_secrets: list[str] | None = None,
         sandbox: Sandbox | None = None,
         sandbox_mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
+        max_output_bytes: int = DEFAULT_MAX_CAPTURE,
     ):
         self._runner = RunCommandTool(
-            known_secrets=known_secrets, sandbox=sandbox, sandbox_mode=sandbox_mode
+            known_secrets=known_secrets,
+            sandbox=sandbox,
+            sandbox_mode=sandbox_mode,
+            max_output_bytes=max_output_bytes,
         )
 
     def detect(self, workspace: Path) -> list[str]:
@@ -255,9 +271,13 @@ class RunLinterTool(Tool):
         known_secrets: list[str] | None = None,
         sandbox: Sandbox | None = None,
         sandbox_mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
+        max_output_bytes: int = DEFAULT_MAX_CAPTURE,
     ):
         self._runner = RunCommandTool(
-            known_secrets=known_secrets, sandbox=sandbox, sandbox_mode=sandbox_mode
+            known_secrets=known_secrets,
+            sandbox=sandbox,
+            sandbox_mode=sandbox_mode,
+            max_output_bytes=max_output_bytes,
         )
 
     def detect(self, workspace: Path) -> list[str]:
@@ -291,8 +311,13 @@ def build_shell_tools(
     timeout_s: float = 120.0,
     sandbox: Sandbox | None = None,
     sandbox_mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
+    max_output_bytes: int = DEFAULT_MAX_CAPTURE,
 ) -> list[Tool]:
-    kwargs = {"sandbox": sandbox, "sandbox_mode": sandbox_mode}
+    kwargs = {
+        "sandbox": sandbox,
+        "sandbox_mode": sandbox_mode,
+        "max_output_bytes": max_output_bytes,
+    }
     return [
         RunCommandTool(
             known_secrets=known_secrets, default_timeout_s=timeout_s, **kwargs

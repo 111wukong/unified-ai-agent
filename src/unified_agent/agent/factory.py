@@ -13,6 +13,7 @@ from unified_agent.models.registry import ModelRegistry
 from unified_agent.observability.jsonl import JsonlSink
 from unified_agent.observability.bus import BusSink, EventBus
 from unified_agent.observability.redact import Redactor
+from unified_agent.orchestration.multi_agent import AgentDeps
 from unified_agent.sandbox import build_sandbox
 from unified_agent.skills.registry import SkillRegistry
 from unified_agent.storage.store import Store
@@ -25,6 +26,7 @@ from unified_agent.tools.memory_tools import (
     build_memory_tools,
     build_skill_tools,
 )
+from unified_agent.tools.multi_agent import build_multi_agent_tools
 from unified_agent.tools.net import build_net_tools
 from unified_agent.tools.permissions import PermissionEngine
 from unified_agent.tools.registry import ToolRegistry
@@ -66,6 +68,15 @@ def default_skill_dirs(settings: Settings) -> list[Path]:
     dirs = [settings.workspace / d for d in settings.skill_dirs]
     dirs.append(settings.home / "skills")
     return dirs
+
+
+def candidate_skill_dirs(settings: Settings) -> list[Path]:
+    """Where `Reflector.write_candidate` puts skills it invented.
+
+    Scanned so they can be *seen* and reviewed. They still cannot run until a
+    human promotes them -- see `SkillRegistry._resolve_status`.
+    """
+    return [settings.home / "skills-candidates"]
 
 
 async def build_agent(
@@ -110,9 +121,13 @@ async def build_agent(
         timeout_s=settings.permissions.shell.default_timeout_s,
         sandbox=sandbox,
         sandbox_mode=settings.sandbox.mode,
+        max_output_bytes=settings.permissions.shell.max_output_bytes,
     ):
         registry.register(tool)
-    for tool in build_net_tools(allow_check=lambda url: engine.check_url(url).allowed):
+    for tool in build_net_tools(
+        allow_check=lambda url: engine.check_url(url).allowed,
+        max_response_bytes=settings.permissions.network.max_response_bytes,
+    ):
         registry.register(tool)
     models_for_memory = models or ModelRegistry(settings)
     memory = build_memory_service(
@@ -126,9 +141,36 @@ async def build_agent(
         registry.register(tool)
     registry.register(UpdatePlanTool())
     registry.register(FinishTool())
-
-    skills = SkillRegistry(skill_dirs or default_skill_dirs(settings))
+    skills = SkillRegistry(
+        skill_dirs or default_skill_dirs(settings),
+        # An explicit `skill_dirs` means "these and only these", so tests get
+        # isolation from whatever the developer happens to have in their own
+        # candidate root.
+        candidate_dirs=[] if skill_dirs else candidate_skill_dirs(settings),
+        # The ladder is stored, not derived. Seeding from the DB is what makes
+        # a promotion survive the process that made it.
+        status_overrides=store.skill_statuses(),
+        # `store_skills` upserts, so promoting a candidate that has never been
+        # seen before still creates its row.
+        on_promote=lambda skill: store_skills(store, [skill]),
+    )
     for tool in build_skill_tools(skills):
+        registry.register(tool)
+
+    # Delegation is registered before skill discovery so a skill may name
+    # `delegate` in its `allowed-tools` without the review calling it unknown.
+    # It is absent entirely when `multi_agent.enabled` is false.
+    deps = AgentDeps(
+        settings=settings,
+        store=store,
+        registry=registry,
+        engine=engine,
+        models=models_for_memory,
+        skills=skills,
+        bus=bus,
+        memory=memory,
+    )
+    for tool in build_multi_agent_tools(deps):
         registry.register(tool)
 
     mcp_problems: list[str] = []

@@ -69,6 +69,13 @@ class EventType(str, Enum):
     WORKFLOW_FAILED = "workflow_failed"
     SKILL_CANDIDATE = "skill_candidate"
 
+    # multi-agent delegation. A sub-agent is a child task, so its own events
+    # live under its own task_id; these are the parent's record of having
+    # delegated, which is what makes the fan-out visible from one place.
+    SUBAGENT_STARTED = "subagent_started"
+    SUBAGENT_COMPLETED = "subagent_completed"
+    SUBAGENT_FAILED = "subagent_failed"
+
 
 class Event(BaseModel):
     """A durable fact. `seq` is per-task and gapless."""

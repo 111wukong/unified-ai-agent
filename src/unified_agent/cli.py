@@ -18,8 +18,8 @@ from datetime import datetime, timezone
 
 from unified_agent import __version__
 from unified_agent.agent.factory import build_agent, default_skill_dirs
-from unified_agent.agent.reflector import Reflector
 from unified_agent.agent.state import TaskStatus
+from unified_agent.observability.events import EventType
 from unified_agent.config import (
     ConfigEditor,
     Settings,
@@ -189,37 +189,29 @@ def _print_result(result, *, quiet: bool = False) -> None:
         err_console.print(f"error: {result.error}")
 
 
-async def _maybe_reflect(agent, result, *, quiet: bool) -> None:
-    """Post-task learning, best-effort. Never allowed to break the run."""
-    if not result.answer:
-        return
-    from unified_agent.agent.state import replay
+def _report_reflection(agent, result, *, quiet: bool) -> None:
+    """Show what the run learned, by reading the events it left.
 
-    try:
-        state = replay(agent.store.events(result.task_id), task_id=result.task_id)
-        reflector = Reflector(
-            model=agent.models.get(),
-            settings=agent.settings,
-            store=agent.store,
-            memory=getattr(agent, "memory", None),
-        )
-        if not reflector.worth_running(state):
-            return
-        reflection = await reflector.run_and_persist(state)
-    except Exception as exc:  # noqa: BLE001
-        if not quiet:
-            console.print(f"[dim]reflection skipped: {type(exc).__name__}[/dim]")
-        return
+    The extraction itself belongs to the runtime -- it has to happen for
+    every entry point, not just this one -- so the CLI only renders the
+    result. Doing the work here too would mean an HTTP-started task learns
+    nothing while a terminal-started one learns, which is what used to be
+    the case.
+    """
     if quiet:
         return
-    for memory in reflection.memories[:5]:
-        console.print(f"[dim]remembered: {escape(str(memory.get('content'))[:100])}[/dim]")
-    if reflection.skill_candidate:
-        console.print(
-            f"[dim]skill candidate written: "
-            f"{escape(str(reflection.skill_candidate.get('name')))} "
-            "(status=candidate, not usable until approved)[/dim]"
-        )
+    for event in agent.store.events(result.task_id):
+        if event.type is EventType.MEMORY_WRITTEN:
+            preview = str(event.payload.get("preview") or "")
+            if preview:
+                console.print(f"[dim]remembered: {escape(preview[:100])}[/dim]")
+        elif event.type is EventType.SKILL_CANDIDATE:
+            name = event.payload.get("name")
+            if name:
+                console.print(
+                    f"[dim]skill candidate written: {escape(str(name))} "
+                    "(status=candidate, not usable until approved)[/dim]"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +434,11 @@ def run(
     reflect: bool = typer.Option(
         False, "--reflect", help="Run post-task memory/skill extraction."
     ),
+    multi_agent: bool = typer.Option(
+        False,
+        "--multi-agent",
+        help="Expose the `delegate` tool so this task can fan out to sub-agents.",
+    ),
     quiet: bool = typer.Option(False, "--quiet", "-q"),
     as_json: bool = typer.Option(False, "--json"),
     home: Optional[Path] = typer.Option(None, "--home"),
@@ -449,6 +446,11 @@ def run(
 ) -> None:
     """Run a single task."""
     settings = _settings(home, workspace)
+    # The runtime owns reflection (so the HTTP layer gets it too); the flag
+    # just turns it on for this run.
+    settings.agent.reflect = reflect
+    if multi_agent:
+        settings.multi_agent.enabled = True
     effects = list(_parse_effects(approve))
     if yes:
         effects = [e for e in EffectClass if e is not EffectClass.SYSTEM_ADMIN]
@@ -474,7 +476,7 @@ def run(
                 err_console.print(escape(str(exc)))
                 return 3
             if reflect:
-                await _maybe_reflect(agent, result, quiet=quiet)
+                _report_reflection(agent, result, quiet=quiet or as_json)
             if as_json:
                 console.print_json(result.model_dump_json())
             else:
@@ -970,27 +972,220 @@ def memory_forget(
 # ---------------------------------------------------------------------------
 
 
+_SKILL_STATUS_STYLE = {
+    "active": "green",
+    "validated": "cyan",
+    "approved": "cyan",
+    "candidate": "yellow",
+    "deprecated": "dim",
+}
+
+
+def _skill_registry(settings: Any):
+    """A registry wired to the stored ladder, without building a whole agent.
+
+    `build_agent` would connect MCP servers and load models to answer a
+    question about a directory listing. What this needs from the store is
+    only the status column.
+    """
+    from unified_agent.agent.factory import candidate_skill_dirs, store_skills
+    from unified_agent.skills.registry import SkillRegistry
+    from unified_agent.storage.store import Store
+
+    store = Store(settings.db_path)
+    registry = SkillRegistry(
+        default_skill_dirs(settings),
+        candidate_dirs=candidate_skill_dirs(settings),
+        status_overrides=store.skill_statuses(),
+        on_promote=lambda skill: store_skills(store, [skill]),
+    )
+    return registry, store
+
+
 @skill_app.command("list")
 def skill_list(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """List discovered skills."""
+    """List discovered skills, including the ones waiting for review."""
     settings = _settings(home, workspace)
-    from unified_agent.skills.registry import SkillRegistry
+    registry, store = _skill_registry(settings)
+    try:
+        result = registry.discover()
+        counts = store.skill_run_counts()
+    finally:
+        store.close()
 
-    registry = SkillRegistry(default_skill_dirs(settings))
-    result = registry.discover()
+    roots = registry.dirs + registry.candidate_dirs
     if not result.loaded:
-        console.print(f"[dim]no skills in {', '.join(str(d) for d in registry.dirs)}[/dim]")
-    for skill in result.loaded:
-        console.print(
-            f"[bold]{skill.name}[/bold]  [dim]{skill.source} · {skill.sha256}[/dim]\n"
-            f"  {escape(skill.description[:140])}"
-            + (f"\n  [dim]tools: {', '.join(sorted(skill.allowed_tools))}[/dim]" if skill.allowed_tools else "")
-        )
+        console.print(f"[dim]no skills in {', '.join(str(d) for d in roots)}[/dim]")
+    if result.loaded:
+        table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+        table.add_column("skill")
+        table.add_column("status")
+        table.add_column("source", style="dim")
+        table.add_column("runs", justify="right", style="dim")
+        for skill in result.loaded:
+            runs = counts.get(skill.name) or {}
+            total = sum(runs.values())
+            run_text = f"{total} ({runs.get('completed', 0)} ok)" if total else "-"
+            style = _SKILL_STATUS_STYLE.get(skill.status, "")
+            table.add_row(
+                skill.name,
+                f"[{style}]{skill.status}[/{style}]" if style else skill.status,
+                skill.source,
+                run_text,
+            )
+        console.print(table)
     for path, problem in result.errors:
         err_console.print(f"{path}: {escape(problem)}")
+
+    pending = registry.pending_review()
+    if pending:
+        console.print()
+        console.print(
+            "[yellow]"
+            + escape(f"{len(pending)} skill(s) awaiting review: ")
+            + "[/yellow]"
+            + escape(", ".join(f"{s.name} ({s.status})" for s in pending))
+        )
+        console.print(
+            "[dim]`uaa skill review <name>` to see what is missing, then "
+            "`uaa skill promote <name> <status>`.[/dim]"
+        )
+
+
+@skill_app.command("promote")
+def skill_promote(
+    name: str,
+    to: str = typer.Argument(..., help="One rung up: validated, approved, active, deprecated."),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Move a skill one rung along candidate -> validated -> approved -> active.
+
+    Skipping rungs is refused: each one is a separate judgement (does it
+    parse / is it correct / does a human accept it / may it run). `deprecated`
+    is reachable from anywhere.
+    """
+    settings = _settings(home, workspace)
+    registry, store = _skill_registry(settings)
+    try:
+        registry.discover()
+        try:
+            skill = registry.promote(name, to)
+        except SkillError as exc:
+            err_console.print(escape(str(exc)))
+            raise typer.Exit(1) from exc
+    finally:
+        store.close()
+
+    console.print(f"{skill.name}: [bold]{skill.status}[/bold]")
+    if skill.status == "active":
+        console.print("[dim]it will appear in the skill index on the next run[/dim]")
+    else:
+        from unified_agent.skills.registry import STATUS_ORDER
+
+        nxt = STATUS_ORDER[STATUS_ORDER.index(skill.status) + 1]
+        console.print(f"[dim]next rung: {nxt}[/dim]")
+
+
+@skill_app.command("review")
+def skill_review(
+    name: str,
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Show what still has to be true before a skill may run."""
+    settings = _settings(home, workspace)
+    registry, store = _skill_registry(settings)
+    try:
+        result = registry.discover()
+        skill = registry.get(name)
+        runs = store.list_skill_runs(skill_name=name)
+    finally:
+        store.close()
+
+    if skill is None:
+        err_console.print(f"unknown skill {name!r}")
+        raise typer.Exit(1)
+
+    report = next((r for r in result.reports if r.skill == name), None)
+    console.print(f"[bold]{skill.name}[/bold]  {skill.status}  [dim]{skill.path}[/dim]")
+    console.print()
+    console.print(escape(skill.description), markup=False)
+    console.print()
+    console.print(f"[dim]allowed tools: {', '.join(sorted(skill.allowed_tools)) or '(none)'}[/dim]")
+    console.print(f"[dim]sha256: {skill.sha256}[/dim]")
+    console.print(f"[dim]runs recorded: {len(runs)}[/dim]")
+    if report is not None:
+        console.print()
+        console.print(report.render(), markup=False)
+
+    checklist = _review_checklist(skill.body)
+    if checklist:
+        console.print()
+        console.print(checklist, markup=False)
+
+    if skill.status != "active":
+        console.print()
+        console.print(
+            "[yellow]not runnable[/yellow] [dim]-- promote it to `active` once the "
+            "checklist above is answered.[/dim]"
+        )
+
+
+def _review_checklist(body: str) -> str:
+    """Pull the `## Review checklist` section out of a generated candidate.
+
+    The reflector writes one when it invents a skill; surfacing it here is
+    the difference between "a human gate" and "a directory nobody opens".
+    """
+    marker = "## Review checklist"
+    if marker not in body:
+        return ""
+    section = body.split(marker, 1)[1]
+    lines = [ln for ln in section.splitlines() if ln.strip()]
+    return f"{marker}\n" + "\n".join(lines[:12])
+
+
+@skill_app.command("runs")
+def skill_runs(
+    name: Optional[str] = typer.Argument(None, help="Limit to one skill."),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Show which tasks loaded a skill and how they ended.
+
+    This is the only evidence behind a `deprecate` decision: a skill that is
+    loaded often and never finishes a task is a skill to retire.
+    """
+    settings = _settings(home, workspace)
+    from unified_agent.storage.store import Store
+
+    store = Store(settings.db_path)
+    try:
+        rows = store.list_skill_runs(skill_name=name)
+    finally:
+        store.close()
+
+    if not rows:
+        console.print("[dim]no skill runs recorded yet[/dim]")
+        return
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    table.add_column("skill")
+    table.add_column("outcome")
+    table.add_column("task", style="dim")
+    table.add_column("when", style="dim")
+    for row in rows:
+        style = "green" if row["outcome"] == "completed" else "red"
+        table.add_row(
+            row["skill_name"],
+            f"[{style}]{row['outcome']}[/{style}]",
+            row["task_id"] or "-",
+            (row["created_at"] or "")[:19],
+        )
+    console.print(table)
 
 
 @skill_app.command("validate")
@@ -1037,15 +1232,18 @@ def skill_show(
 ) -> None:
     """Print a skill's full instructions."""
     settings = _settings(home, workspace)
-    from unified_agent.skills.registry import SkillRegistry
+    registry, store = _skill_registry(settings)
+    try:
+        registry.discover()
+        skill = registry.get(name)
+    finally:
+        store.close()
 
-    registry = SkillRegistry(default_skill_dirs(settings))
-    registry.discover()
-    skill = registry.get(name)
     if skill is None:
         err_console.print(f"unknown skill {name!r}")
         raise typer.Exit(1)
     # Skill bodies are Markdown with [links](url) -- markup=False keeps them.
+    console.print(f"[dim]status: {skill.status}[/dim]")
     console.print(skill.render(), markup=False)
 
 

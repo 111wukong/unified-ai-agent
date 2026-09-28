@@ -443,6 +443,7 @@ class Store:
         query_vector: list[float] | None = None,
         vector_model: str | None = None,
         min_similarity: float = 0.0,
+        vector_limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Search memories. `mode` is `fts`, `vector`, `hybrid` or `auto`.
 
@@ -456,6 +457,12 @@ class Store:
         normalisation step that is itself a tuning problem. RRF only looks at
         *positions*, which is why it works without tuning and why it is the
         right default here.
+
+        `vector_limit` is how deep the vector branch reads before fusion, and
+        is floored at `limit`: a list shorter than the final result set cannot
+        distinguish "rank 1 here, absent there" from "rank 1 in both", which is
+        the only signal RRF has. None keeps the `limit * 3` heuristic for
+        callers with no configuration to read.
         """
         q = query.strip()
         if mode == "auto":
@@ -479,11 +486,12 @@ class Store:
         ranked: list[list[str]] = []
         fts_rows = self._search_fts(q, scope=scope, limit=limit * 3) if q else []
         ranked.append([r["id"] for r in fts_rows])
+        depth = max(limit, vector_limit) if vector_limit else limit * 3
         vector_rows = (
             self.search_vectors(
                 query_vector or [],
                 model=vector_model or "",
-                limit=limit * 3,
+                limit=depth,
                 scope=scope,
                 min_similarity=min_similarity,
             )
@@ -791,12 +799,60 @@ class Store:
         rows = self.conn.execute("SELECT * FROM skills ORDER BY name ASC").fetchall()
         return [dict(r) for r in rows]
 
+    def skill_statuses(self) -> dict[str, str]:
+        """name -> status, for seeding the registry's ladder.
+
+        This is the read half of the ladder. Without it the table was
+        write-only: `promote` could be called all day and the next process
+        still saw whatever the directory implied.
+
+        The write half is `upsert_skill`, not a bare UPDATE -- a promotion
+        can be the first thing that ever touches a freshly written candidate,
+        and an UPDATE against a missing row succeeds while changing nothing.
+        """
+        rows = self.conn.execute("SELECT name, status FROM skills").fetchall()
+        return {r["name"]: r["status"] for r in rows}
+
     def record_skill_run(self, *, skill_name: str, task_id: str, outcome: str) -> None:
         with self._lock:
             self.conn.execute(
                 "INSERT INTO skill_runs(id,skill_name,task_id,outcome,created_at) VALUES(?,?,?,?,?)",
                 (new_id("skillrun"), skill_name, task_id, outcome, now_iso()),
             )
+
+    def list_skill_runs(self, *, skill_name: str | None = None) -> list[dict[str, Any]]:
+        """Skill usage history, newest first.
+
+        The feedback half of the loop: `promote` to `active` is a guess until
+        there is evidence, and this is the only place that evidence lives.
+
+        Ordered by `created_at` *and* `rowid`. `created_at` is millisecond
+        precision, so two runs recorded in the same millisecond tie and the
+        order becomes whatever SQLite happens to return -- the same defect
+        that already bit the task list. `rowid` is monotonic for inserts, so
+        it breaks the tie by real insertion order.
+        """
+        if skill_name:
+            rows = self.conn.execute(
+                "SELECT * FROM skill_runs WHERE skill_name=?"
+                " ORDER BY created_at DESC, rowid DESC",
+                (skill_name,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM skill_runs ORDER BY created_at DESC, rowid DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def skill_run_counts(self) -> dict[str, dict[str, int]]:
+        """name -> {outcome: count}. One query, for the listing."""
+        rows = self.conn.execute(
+            "SELECT skill_name, outcome, COUNT(*) AS n FROM skill_runs GROUP BY skill_name, outcome"
+        ).fetchall()
+        out: dict[str, dict[str, int]] = {}
+        for row in rows:
+            out.setdefault(row["skill_name"], {})[row["outcome"]] = row["n"]
+        return out
 
 
 def _reciprocal_rank_fusion(ranked_lists: list[list[str]], *, k: int = 60) -> list[str]:

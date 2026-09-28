@@ -61,6 +61,9 @@ class MemoryService:
         # A floor, not a relevance gate: cosine 0 means "nothing in common",
         # and returning those as results is worse than returning fewer.
         self.min_similarity = 0.0
+        # How deep the vector branch reads before rank fusion. Set from
+        # `memory.vector_limit`; `search_memories` floors it at `limit`.
+        self.vector_limit = 10
 
     # -- reads ------------------------------------------------------------
     @property
@@ -94,6 +97,7 @@ class MemoryService:
             query_vector=query_vector,
             vector_model=vector_model,
             min_similarity=self.min_similarity,
+            vector_limit=self.vector_limit,
         )
 
     def stats(self) -> dict[str, Any]:
@@ -234,6 +238,7 @@ def build_memory_service(
     )
     service = MemoryService(store, embeddings=embeddings, curator=curator)
     service.min_similarity = config.min_similarity
+    service.vector_limit = config.vector_limit
     return service
 
 

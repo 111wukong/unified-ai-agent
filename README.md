@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-467%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-535%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -11,10 +11,12 @@
 uaa init
 uaa run --model mock "查看当前目录下的 Python 文件并总结"   # 离线，不需要任何 API key
 uaa run "分析认证模块并补充测试"                            # 用真实模型
+uaa run --multi-agent "对比这五个模块的设计取舍"            # 显式开启子 Agent 扇出
 uaa serve                                                   # HTTP + WebSocket + Web 控制台
 uaa desktop                                                 # 原生桌面窗口
 uaa desktop --bundle                                        # 打成可双击的 .app
 uaa sandbox                                                 # 报告进程隔离实际是否生效
+uaa skill list                                              # 技能，含等待人工审核的候选
 ```
 
 ---
@@ -122,13 +124,28 @@ uaa run "..." --yes                        # 除 system_admin 全放行
 
 渐进披露：启动时只加载 `name` + `description`（每技能约 100 token），正文由 `load_skill` 工具按需拉取。
 
-技能状态阶梯是**强制**的：
+技能状态阶梯是**强制**的，而且是**存下来的**：
 
 ```
 candidate → validated → approved → active → deprecated
 ```
 
-Agent 自己写的技能停在 `candidate`，**无法执行**，直到人工推进。
+状态来源有明确优先级：**数据库行 > frontmatter 的 `metadata.status` > 目录默认值**。数据库行排在前面，因为只有 `promote` 会写它，而 `promote` 是人的动作。
+
+```bash
+uaa skill list                              # 含等待审核的候选
+uaa skill review deploy-check               # 安全审查 + 它自己写的审核清单
+uaa skill promote deploy-check validated    # 一次一档，跳级被拒
+uaa skill runs deploy-check                 # 这个技能到底有没有用
+```
+
+三件让这个阶梯不只是摆设的事：
+
+1. **候选目录也在扫描范围内。** Agent 自己写的技能落在 `$UAA_HOME/skills-candidates/`。以前这个目录**不被扫描** —— 那确实让它无法执行，但也让它**不可见**，于是「人工闸门」没有任何东西可以闸，因为没人看得见待审的东西。
+2. **候选无法自我提权。** 候选目录是 Agent 唯一能写的目录，所以那里的文件**无论自称什么状态都是 `candidate`**。把 `metadata.status` 改成 `active` 不会让它变成 active —— 阶梯才是权威，不是文件。
+3. **每次加载技能都记一笔账。** `skill_runs` 记录哪个任务加载了哪个技能、结局如何。这是 `deprecate` 唯一的证据来源；没有它，退役一个技能只能凭感觉。
+
+`delegate` 工具（多 Agent）是**缺席**而不是「拒绝」：关掉时它不在工具目录里。一个列在提示词里、调用永远失败的工具有两个代价 —— 一次白花的模型调用，以及让模型学会「工具目录会骗人」。
 
 ### 6. 模型无关靠的是能力矩阵，不是一个 Protocol
 
@@ -146,6 +163,30 @@ class ModelCapabilities:
 
 ---
 
+## 配置：读-改-写，所以序列化必须全量
+
+```bash
+uaa config set agent.max_steps 12
+uaa config set multi_agent.enabled true
+uaa config set permissions.network.max_response_bytes 500000
+uaa config show
+```
+
+`uaa config set` 是**读-改-写**：加载整个文件、改一个键、把整份写回去。所以序列化器漏掉一个节不是「少写一行」，而是**把用户的设置从文件里删掉**。
+
+原来的序列化器手写了一个节列表（`models` / `permissions` / `agent`），于是 `[permissions.network]`、`[sandbox]`、`[memory]`、`[multi_agent]` 都会在下次 `config set` 时消失——最尖的一处是手写的网络白名单，它会在有人改一次步数预算时无声蒸发。
+
+现在序列化**遍历模型字段**而不是列举节，并且 `tests/test_config_round_trip.py` 遍历**整个配置面**做往返断言：以后新增字段忘了序列化会测试失败，而不是吃掉用户的配置。
+
+两条附带规则：
+
+- **`home` / `workspace` 永不写入文件。** 它们由调用方决定，而且 `load_settings` 在 `**raw` 之前显式传它们——文件里出现这两个键会直接 `TypeError`，还是这个工具自己写出来的文件。
+- **`config set` 会校验单个字段。** `setattr` 不触发 pydantic 校验，所以 `config set sandbox.mode read-only` 原本会存下裸字符串，字段类型悄悄不再是 `SandboxMode`。
+
+> 权限决策的写法变了：现在是 `[permissions.defaults]` 子表。`network = "confirm"` 这种裸键简写**仍然可读**（校验器两种都收），但它无法和 `[permissions.network]` 表共存——TOML 不允许同一个键既是值又是表，而 `network` 恰好两样都是。
+
+---
+
 ## 架构
 
 ```
@@ -155,9 +196,10 @@ CLI (typer + rich)
         ├── ContextBuilder             预算 / 主动压缩 / 确定性兜底
         ├── ToolRunner                 校验 → 策略 → 写前台账 → 执行 → 截断外置
         ├── Reflector                  任务结束后一次：记忆 + 技能候选
+        ├── MultiAgentRunner           子 Agent = 带 parent_task_id 的普通任务
         └── PermissionEngine           路径围栏 / 命令守卫 / 域名白名单 / 环境脱敏
-              ├── ToolRegistry         builtin + skills + MCP
-              ├── SkillRegistry        SKILL.md 规范 + 安全审查
+              ├── ToolRegistry         builtin + skills + MCP + delegate
+              ├── SkillRegistry        SKILL.md 规范 + 安全审查 + 持久化状态阶梯
               ├── ModelRegistry        能力矩阵 + 适配器
               └── Store                SQLite: events / tasks / tool_calls / artifacts / memories(FTS5) / skills
 ```
@@ -187,12 +229,14 @@ src/unified_agent/
 │   ├── shell.py        run_command / run_tests / run_linter（自动识别项目 venv）
 │   ├── net.py          http_get / http_post（重定向逐跳复检白名单）
 │   ├── mcp.py          MCP stdio 客户端（双协议时代）
+│   ├── multi_agent.py  delegate 工具：规模规则写进描述，效果等级取子 Agent 上限
 │   ├── memory_tools.py save_memory / search_memory / load_skill / update_plan / finish
 │   └── registry.py
 ├── orchestration/
 │   ├── workflow.py     DSL 解析 + 静态校验（DAG、引用、可达性、审批）
 │   ├── expressions.py  `{{#node.field#}}` 解析与条件求值
-│   └── runner.py       执行器：工作流运行本身是一个 task
+│   ├── runner.py       执行器：工作流运行本身是一个 task
+│   └── multi_agent.py  编排者-工作者：契约、并发上限、子 Agent 预算、报告落盘
 ├── memory/
 │   ├── embeddings.py   向量提供方：OpenAI 兼容 / 离线哈希 / 无
 │   ├── vector.py       cosine 检索，sqlite-vec 加速、纯 Python 兜底
@@ -213,7 +257,7 @@ src/unified_agent/
 │   ├── anthropic.py
 │   ├── mock.py         离线确定性模型（测试与 demo）
 │   └── registry.py
-├── skills/             SKILL.md 加载、规范校验、安全审查、状态阶梯
+├── skills/             SKILL.md 加载、规范校验、安全审查、状态阶梯（DB 持久化）
 ├── storage/            SQLite schema、事件存储、工具台账、产物
 └── observability/      事件词汇表、JSONL sink、密钥脱敏
 ```
@@ -345,6 +389,39 @@ uaa memory history <id>                       # 这条记忆以前是什么
 
 ---
 
+## 多 Agent：默认关闭，而且理由充分
+
+```bash
+uaa run --multi-agent "对比这五个模块的设计取舍"
+uaa config set multi_agent.enabled true      # 或者常开
+uaa config set multi_agent.model gpt-4.1-mini # 子 Agent 用便宜模型
+```
+
+调研给出的数字决定了它的默认值：多 Agent 比普通对话多用 **约 15×** token（单 Agent 约 4×），而同一份资料明确说**编程任务不适合**——可并行拆分的子任务比研究类任务少得多。所以它是**显式开启 + 预算闸门**，不是默认行为。
+
+它真正擅长的是**高度并行 + 信息量超出单上下文窗口**的活：同时看很多文件、比对很多独立方案、从很多来源收集。
+
+编排者拿到 `delegate` 工具，把活拆成若干份。让这套东西**能跑**和**能跑对**的区别在四条规则上：
+
+| 规则 | 为什么 |
+|---|---|
+| **规模规则写进工具描述** | 模型判断不了该投入多少。早期典型失败是给一个简单问题生成五十个子 Agent。描述里写明「一次事实查询 → 不要委派；两项对比 → 2–4 个」，硬上限另外在 `check()` 里强制 |
+| **委派是契约，不是一句话** | 每个子 Agent 必须带**目标 + 输出格式 + 边界**（`guidance` 可选）。一句话的简报会让多个子 Agent 做**完全相同的搜索** |
+| **子 Agent 的产出落盘** | 完整报告写文件，编排者只拿到**路径 + 有上限的摘要**。把每份报告都粘回父上下文就是「传话游戏」，那会让多 Agent 比单 Agent 更差 |
+| **编排者是唯一写共享状态的人** | 子 Agent 默认只有 `read_only`。它们读、报告，不写——所以不会互相踩，也不会改掉编排者的计划 |
+
+子 Agent 就是一次普通的 `AgentRuntime.run()`，带 `parent_task_id`。**这是它不需要新执行内核的原因**：预算、权限、事件流、恢复全部自动适用，`uaa task events <子任务id>` 就能看它做了什么。真正的收益也在这里——**上下文隔离是白送的**。
+
+三个实现细节值得单独说：
+
+- **`delegate` 的效果等级 = 它能授予的最强效果。** 如果 `multi_agent.allowed_effects` 里有 `execute_local`，那 `delegate` 自己就声明 `execute_local`，于是委派本身要过权限引擎。一个能悄悄发出比它声明的更多权限的工具，会让效果等级变成装饰。
+- **`system_admin` 不允许由配置文件授予。** 和工作流审批层、HTTP 层拒绝它的理由完全一样：数据文件不是策略权威，而子 Agent 是无人值守运行的。
+- **子 Agent 不反思。** 五个子 Agent 就会多五次抽取调用，而编排者本来就要对合并后的结果反思一次。
+
+子 Agent 撞到它没被授予的效果时会**停下来问**，而不是绕过去。编排者会看到 `BLOCKED awaiting approval for \`write_file\``，并转告用户去批准那个子任务——HITL 没有被多 Agent 绕开。
+
+---
+
 ## 桌面端：系统 webview，不是 Electron
 
 ```bash
@@ -452,22 +529,22 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 | 阶段 | 内容 |
 |---|---|
 | Phase 2 | ✅ FastAPI + SSE/WebSocket（AG-UI）、✅ 沙箱（Seatbelt / Docker） |
-| Phase 3 | ✅ 向量记忆与矛盾处理、⏸ 技能审核流程 |
-| Phase 4 | ✅ YAML 工作流、⏸ 多 Agent（orchestrator-worker）、⏸ A2A v1.0 |
-| Phase 5 | ✅ Web 控制台（零构建）、⏸ TypeScript SDK、渠道适配器 |
+| Phase 3 | ✅ 向量记忆与矛盾处理、✅ 技能审核流程（候选可见 + 状态持久化 + CLI/API 推进） |
+| Phase 4 | ✅ YAML 工作流、✅ 多 Agent（orchestrator-worker）、⏸ A2A v1.0 |
+| Phase 5 | ✅ Web 控制台（零构建）、⏸ TypeScript SDK、⏸ 渠道适配器 |
 
 调研与采纳决策见 [`docs/phase2-5-research.md`](docs/phase2-5-research.md)。
 
-多 Agent 明确不在第一版：token 消耗增加、调试困难、状态同步复杂、错误责任不清。**AutoGen 的 5–6× token 成本就来自每个 agent 每轮一次 LLM 调用** —— 本项目的反思只在任务结束后调一次，也是同一个理由。
+多 Agent **默认关闭**：token 消耗约 15×，而且调研明确说编程任务不适合它。做成「显式开启 + 预算闸门 + 角色可配」，理由和实测数字见上面的多 Agent 一节。
 
-跨框架 Agent 通信**不自造协议**，等 Phase 4 直接实现 A2A（Linux Foundation 标准，150+ 支持者）。
+跨框架 Agent 通信**不自造协议**，等下一阶段直接实现 A2A（Linux Foundation 标准，150+ 支持者）。
 
 ---
 
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 467 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 535 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -475,6 +552,8 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 测试套件的设计目标：**不需要网络、不需要密钥就能跑真实 agent 循环**。需要 API key 的测试套件等于不会跑的测试套件。
 
 `ScriptedModel` 让整个循环可控可断言：结构化输出（规划）交给确定性 mock，循环回合按脚本走。崩溃用「插入写前台账行」来模拟——这正是真实崩溃留下的东西。
+
+多 Agent 的并发测试需要**按别名分发**的模型注册表：`ScriptedModels` 对任何别名都返回同一个实例，而并发子 Agent 共用一份脚本游标会互相吃掉对方的步骤——正是这个功能要避免的那种共享。
 
 ### 测试抓到的静默缺陷
 
@@ -500,8 +579,34 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 | 可粘贴命令里的路径没加引号 | 项目路径含空格（`WorkBuddy AI`），粘贴即失败 |
 | **健康探测不带令牌** | 令牌默认开启，于是 `uaa desktop` 每次都会报「服务起不来」，而服务其实好好的 |
 | **`iconutil` 要求目录名以 `.iconset` 结尾** | 起错名一律报 "Invalid Iconset"，而失败原因被吞成「iconutil 不可用」 |
-| 打包用 `rmtree` 清理中间产物 | 递归删除撞上删除护栏，打包直接崩；改成暂存目录 + rename 换入 |
+| 打包用 `rmtree` 清理中间产物 | 递归删除撞上删除护栏，打包直接崩；改成暂存目录 + 重命名换入 |
 | `--check` 却先要求 GUI 可用 | 它存在的意义就是在没有 GUI 的地方验证，结果在 CI 上必然失败 |
+
+### 第二轮：声明了但没接线
+
+上一批是「代码看起来对、行为不对」。这一批是同一类问题的一个子类，而且更难发现，因为**它不产生任何错误**：字段照常出现在 `uaa config show` 里，事件类型照常能 import，类型检查全过、测试全绿、答案也对——只是那个功能悄悄什么都没做。
+
+| 缺陷 | 为什么危险 |
+|---|---|
+| `permissions.shell.max_output_bytes` / `permissions.network.max_response_bytes` / `memory.vector_limit` 三个字段**没有任何代码读取** | 用户在 `config show` 里改它们，看到成功，然后以为生效了。默认值和硬编码常量恰好相同，所以改了也看不出来 |
+| **七个 `EventType` 从不 emit**（`MODEL_ERROR` / `MODEL_RETRY` / `TOOL_REPLAYED` / `MEMORY_SEARCHED` / `SKILL_LOADED` / `NODE_SKIPPED` / `MODEL_REQUEST`） | 审计链看起来完整，唯独你最需要看的那一件事不在里面：重试了几次、哪个调用是崩溃后重放的、召回到底跑了没有 |
+| **候选目录只写不读** | Agent 写出的技能候选落在磁盘上，然后对所有命令**不可见**。README 宣称「人工闸门」，但人连待审的东西都看不到——闸门没有可闸之物 |
+| **技能状态阶梯只活在内存里** | `promote()` 改的是一个变量。下一个进程看到的仍是目录默认值，于是「阶梯」每次重启归零 |
+| `skill_runs` 表只写不读 | schema 承诺它回答「这个技能到底有没有用」，但没有任何读取路径，`deprecate` 只能凭感觉 |
+| **反射只接在 CLI 上** | `uaa run --reflect` 会学习，`POST /agui` 启动的任务永远不写记忆、不产候选。同一个内核能力只从两个入口里的一个可达 |
+| **`config_to_toml` 手写节列表** | `uaa config set` 是读-改-写：序列化器不认识的节会被**从文件里删掉**。手写的 `[permissions.network] allow_domains` 在有人改一次步数预算时无声消失 |
+| **`_hoist_effect_keys` 把策略表当成决策值** | `network` 既是效果类名、又是 `[permissions.network]` 表名。它无条件 `pop("network")`，把网络白名单塞进了决策映射 |
+| **上面两条互相掩盖** | 序列化器从不写 `permissions.network`，所以校验器的越界一直没被触发。修好序列化器的那一刻，另一个 bug 立刻冒出来——两个缺陷叠在一起，表现是「什么都没发生」 |
+| `config set` 的路径只支持 `agent.*` / `models.*` | `memory.vector_limit`、`sandbox.mode`、`multi_agent.enabled` 都是文档里的旋钮，CLI 却拒绝设置。只能手改 TOML 的配置项，等于大多数人永远找不到 |
+| `setattr` 不做校验 | pydantic 默认只在构造时校验。`config set sandbox.mode read-only` 存下的是裸字符串，类型悄悄不再是 `SandboxMode`——今天比较相等，第一次用 `is` 就崩 |
+| `list_skill_runs` 按毫秒时间戳排序 | 同一毫秒写入的两条记录顺序不定。**和任务列表那个缺陷一模一样**，说明「毫秒精度不够」是一条会复发的规律，不是一次性 bug |
+| `state.loaded_skills` 从不被写入 | 技能效果归因的唯一来源是空的，于是 `skill_runs` 即使接了线也只会记 0 条 |
+
+**这一批带走的经验：**
+
+1. **「声明了」和「接线了」是两件事，而且前者看起来和后者完全一样。** 死字段、死事件、死表不会报错、不会让测试变红、不会让答案变错。唯一的防线是**针对每个声明面写一条断言「它的值改变了某个可观测结果」**——`tests/test_wiring.py` 就是这条防线，它开头写的规则是「这个文件里提到的每一个字段和事件，都必须有一条断言证明它影响了行为」。
+2. **两个缺陷可以互相掩盖，而且表现是「一切正常」。** `config_to_toml` 的遗漏恰好让 `_hoist_effect_keys` 的越界永远不触发。这类组合不会在任何一个缺陷被单独测试时暴露——只有把其中一个修好，另一个才现形。所以修完一个地方要重跑**全量**，不要只跑相关的那几个。
+3. **配置的读-改-写必须有全量往返测试。** 序列化器漏一个节不是「少写一行」，是「静默删除用户的设置」。`tests/test_config_round_trip.py` 遍历整个配置面而不是列一遍今天的节，所以以后新增字段忘了序列化会**测试失败**，而不是吃掉用户的配置。
 
 ## License
 

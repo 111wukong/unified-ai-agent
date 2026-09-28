@@ -17,7 +17,9 @@ import httpx
 from unified_agent.tools.base import Tool, ToolContext, ToolSpec
 from unified_agent.types import EffectClass, ToolResult
 
-_MAX_BYTES = 2_000_000
+# Fallback only. The effective ceiling is `permissions.network.max_response_bytes`;
+# kept as a module constant so the tools stay usable when constructed directly.
+DEFAULT_MAX_BYTES = 2_000_000
 _ALLOWED_METHODS = {"GET", "POST"}
 
 
@@ -30,10 +32,12 @@ class _HttpBase(Tool):
         allow_check: Callable[[str], bool] | None = None,
         timeout_s: float = 60.0,
         user_agent: str = "unified-ai-agent/0.1",
+        max_response_bytes: int = DEFAULT_MAX_BYTES,
     ) -> None:
         self.allow_check = allow_check or (lambda url: True)
         self.timeout_s = timeout_s
         self.user_agent = user_agent
+        self.max_response_bytes = max_response_bytes
 
     async def _request(
         self, method: str, url: str, *, body: dict[str, Any] | None, headers: dict[str, str]
@@ -62,14 +66,14 @@ class _HttpBase(Tool):
                 current = str(httpx.URL(current).join(resp.headers["location"]))
                 method, body = "GET", None
                 continue
-            raw = resp.content[:_MAX_BYTES]
+            raw = resp.content[: self.max_response_bytes]
             text = raw.decode(resp.encoding or "utf-8", errors="replace")
             if resp.headers.get("content-type", "").startswith("application/json"):
                 try:
                     text = json.dumps(resp.json(), indent=2, ensure_ascii=False)
                 except ValueError:
                     pass
-            truncated = len(resp.content) > _MAX_BYTES
+            truncated = len(resp.content) > self.max_response_bytes
             return ToolResult(
                 success=resp.is_success,
                 output=f"HTTP {resp.status_code} {current}\n\n{text}",
@@ -141,5 +145,10 @@ class HttpPostTool(_HttpBase):
         )
 
 
-def build_net_tools(*, allow_check: Callable[[str], bool] | None = None) -> list[Tool]:
-    return [HttpGetTool(allow_check=allow_check), HttpPostTool(allow_check=allow_check)]
+def build_net_tools(
+    *,
+    allow_check: Callable[[str], bool] | None = None,
+    max_response_bytes: int = DEFAULT_MAX_BYTES,
+) -> list[Tool]:
+    kwargs = {"allow_check": allow_check, "max_response_bytes": max_response_bytes}
+    return [HttpGetTool(**kwargs), HttpPostTool(**kwargs)]

@@ -12,12 +12,14 @@ written to disk by this tool).
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 
 from unified_agent.errors import ConfigError
 from unified_agent.sandbox.base import SandboxMode
@@ -163,12 +165,17 @@ class ShellPolicy(BaseModel):
     # standard way a "safe" allowlisted command smuggles a second one.
     allow_metacharacters: bool = False
     default_timeout_s: float = 120.0
+    # Ceiling on captured stdout+stderr, per command. Applied in
+    # `tools/shell.py::_exec`; output past it is cut, not silently dropped
+    # (the cut is announced in the text the model reads).
     max_output_bytes: int = 200_000
 
 
 class NetworkPolicy(BaseModel):
     allow_domains: list[str] = Field(default_factory=list)
     allow_all: bool = False
+    # Ceiling on a response body, in bytes. Applied in `tools/net.py`; the
+    # result is flagged `truncated` so the model knows it did not see all of it.
     max_response_bytes: int = 2_000_000
 
 
@@ -196,6 +203,13 @@ class PermissionConfig(BaseModel):
 
         Writing the effect names as bare keys is far more readable than a
         nested [permissions.defaults] table, so accept both.
+
+        Only a *string* is treated as a decision. `network` is both an effect
+        class and the name of the `[permissions.network]` policy table, and
+        popping it unconditionally moved a network allowlist into the
+        decision map -- which then failed validation. That went unnoticed
+        because the old TOML dumper never wrote `[permissions.network]`: the
+        serializer's omission was hiding the validator's overreach.
         """
         if not isinstance(data, dict):
             return data
@@ -203,7 +217,7 @@ class PermissionConfig(BaseModel):
         explicit = dict(data.get("defaults") or {})
         for effect in EffectClass:
             for key in (effect.value, effect.value.replace("_", "")):
-                if key in data:
+                if key in data and isinstance(data[key], str):
                     explicit[effect] = data.pop(key)
         if explicit:
             data["defaults"] = explicit
@@ -237,6 +251,10 @@ class AgentConfig(BaseModel):
     keep_recent_observations: int = 6
     # Fraction of the context window reserved for the model's own output.
     output_reserve_ratio: float = 0.15
+    # Post-task memory + skill-candidate extraction. Off by default because
+    # it costs one extra model call per task, and that is a cost the user
+    # should opt into. `uaa run --reflect` and the HTTP layer both set it.
+    reflect: bool = False
 
 
 class McpServerConfig(BaseModel):
@@ -250,6 +268,45 @@ class McpServerConfig(BaseModel):
     requires_confirmation: bool = True
     enabled: bool = True
     startup_timeout_s: float = 30.0
+
+
+class MultiAgentConfig(BaseModel):
+    """Orchestrator-worker delegation.
+
+    Off by default, and that is the point. The measured cost of multi-agent
+    is roughly 15x the tokens of a plain chat (about 4x for a single agent),
+    and the same research says explicitly that coding tasks are a poor fit --
+    there are fewer genuinely parallel subtasks than in open-ended research.
+    What it does win at is work that is highly parallel *and* wider than one
+    context window. So this is an explicit choice behind a hard budget gate,
+    not a default.
+    """
+
+    enabled: bool = False
+    # Alias for sub-agents. Empty means "inherit the orchestrator's".
+    # Splitting them is the standard cost shape: a strong model plans and
+    # synthesises, cheap ones do the reading. It is also the only way to get
+    # the fan-out under a budget you would accept.
+    model: str = ""
+    # Hard cap per delegation. The classic early failure is a model spawning
+    # fifty sub-agents for a question that needed one.
+    max_agents: int = 5
+    # How many run at once. The 3-5 range is where the measured speedup is.
+    parallelism: int = 3
+    # Per sub-agent, not shared out of the parent's pool: one sub-agent that
+    # will not stop searching must not be able to spend the whole run.
+    max_steps_per_agent: int = 12
+    # Effects a sub-agent may use without asking. Read-only by default: the
+    # orchestrator is the only writer of shared state, so sub-agents cannot
+    # trample each other's edits or the orchestrator's plan.
+    allowed_effects: list[EffectClass] = Field(
+        default_factory=lambda: [EffectClass.READ_ONLY]
+    )
+    # Characters of each sub-agent answer that come back into the
+    # orchestrator's context. The full body goes to a file: pasting every
+    # report into the conversation is the "telephone game" that makes the
+    # orchestrator worse than a single agent.
+    max_summary_chars: int = 1_200
 
 
 class MemoryConfig(BaseModel):
@@ -267,6 +324,9 @@ class MemoryConfig(BaseModel):
     embedding_api_key_env: str = "OPENAI_API_KEY"
     hashing_dim: int = 512
     neighbour_limit: int = 5
+    # How deep the vector branch reads before reciprocal rank fusion merges
+    # it with FTS. Floored at the caller's `limit`: a ranked list shorter
+    # than the result set gives RRF nothing to compare.
     vector_limit: int = 10
     # Drop vector hits at or below this cosine similarity. 0.0 only removes
     # "nothing in common"; it is not a relevance threshold.
@@ -296,6 +356,7 @@ class Settings(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
     skill_dirs: list[str] = Field(default_factory=lambda: ["skills"])
 
@@ -482,13 +543,14 @@ def load_settings(
         if "default_model" not in raw:
             raw["default_model"] = "mock"
 
-    settings = Settings(
-        home=home,
-        workspace=workspace,
-        models=models,
-        **{k: v for k, v in raw.items() if k in Settings.model_fields},
-    )
-
+    # `home` and `workspace` are decided by the caller, not by the file. They
+    # are filtered out rather than passed through because passing them twice
+    # is a `TypeError: got multiple values for keyword argument`, which is a
+    # traceback instead of a sentence.
+    file_settings = {
+        k: v for k, v in raw.items() if k in Settings.model_fields and k not in _NOT_FILE_SETTINGS
+    }
+    settings = Settings(home=home, workspace=workspace, models=models, **file_settings)
     # env scalar overrides
     if env_model := os.environ.get("UAA_DEFAULT_MODEL"):
         settings.default_model = env_model
@@ -503,45 +565,128 @@ def load_settings(
     return settings
 
 
+#: Supplied by the process, never by the file. They are excluded from the
+#: dumper because `load_settings` passes them explicitly *before* `**raw`:
+#: a config file containing them raises "got multiple values for keyword
+#: argument" rather than doing anything useful.
+_NOT_FILE_SETTINGS = frozenset({"home", "workspace"})
+
+
 def config_to_toml(settings: Settings) -> str:
-    """Serialize the parts a human should edit back to TOML."""
+    """Serialize the whole editable configuration back to TOML.
 
-    def dump(value: Any) -> str:
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        if isinstance(value, str):
-            return f'"{value}"'
-        if isinstance(value, list):
-            return "[" + ", ".join(dump(v) for v in value) + "]"
-        return str(value)
+    Generic over the model fields rather than a hand-listed set of sections.
+    The hand-listed version was not merely incomplete, it **lost data**:
+    `uaa config set` is a read-modify-write, so every section the dumper did
+    not know about was deleted from the file the first time the user changed
+    anything. A hand-written `[permissions.network] allow_domains` vanished
+    the moment someone edited a step budget.
 
-    lines: list[str] = [f"default_model = {dump(settings.default_model)}", ""]
-    for alias, spec in settings.models.items():
-        lines.append(f"[models.{alias}]")
-        data = spec.model_dump(exclude_none=True)
-        data.pop("capabilities", None)
-        for key, value in data.items():
-            lines.append(f"{key} = {dump(value)}")
+    Everything except `home`/`workspace` round-trips, and
+    `tests/test_config_round_trip.py` asserts that over the whole surface --
+    so a new field the dumper forgets fails a test instead of quietly
+    deleting a user's setting.
+    """
+    lines: list[str] = []
+    _emit_table(lines, "", settings)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _emit_table(lines: list[str], prefix: str, model: BaseModel) -> None:
+    scalars: list[tuple[str, Any]] = []
+    tables: list[tuple[str, BaseModel]] = []
+    arrays: list[tuple[str, list[Any]]] = []
+    # `dict[str, ModelSpec]` is a table per key, not a scalar: rendering it
+    # with `_dump_scalar` emits a pydantic repr that is not valid TOML, and
+    # the file this tool writes then cannot be read back.
+    keyed_tables: list[tuple[str, dict[Any, BaseModel]]] = []
+    # A map of enums (`permissions.defaults`) gets its own table so the
+    # security decisions are one per line. It cannot be hoisted to bare keys
+    # under `[permissions]`, which is the documented shorthand: `network` is
+    # both an effect class and the `[permissions.network]` table, and TOML
+    # refuses to have the same key be both a value and a table.
+    enum_maps: list[tuple[str, dict[Any, Any]]] = []
+    for name in type(model).model_fields:
+        if not prefix and name in _NOT_FILE_SETTINGS:
+            continue
+        value = getattr(model, name)
+        # `None` means "unset" for every optional field here (a base_url, a
+        # price, a key env var). Writing it would emit a bare `None`, which
+        # is not TOML, and the loader would then reject the file this tool
+        # just wrote.
+        if value is None:
+            continue
+        if isinstance(value, BaseModel):
+            tables.append((name, value))
+        elif isinstance(value, dict) and any(
+            isinstance(v, BaseModel) for v in value.values()
+        ):
+            keyed_tables.append((name, value))
+        elif isinstance(value, dict) and value and all(
+            isinstance(v, Enum) for v in value.values()
+        ):
+            enum_maps.append((name, value))
+        elif isinstance(value, list) and any(isinstance(v, BaseModel) for v in value):
+            arrays.append((name, value))
+        else:
+            scalars.append((name, value))
+
+    if prefix:
+        lines.append(f"[{prefix}]")
+    for name, value in scalars:
+        lines.append(f"{name} = {_dump_scalar(value)}")
+    if prefix or scalars:
         lines.append("")
+    # Sub-tables come after every scalar of this table: TOML has no way back
+    # to the parent once a new `[header]` has been opened.
+    for name, value in tables:
+        _emit_table(lines, f"{prefix}.{name}" if prefix else name, value)
+    for name, mapping in keyed_tables:
+        for key, item in mapping.items():
+            child = f"{prefix}.{name}.{key}" if prefix else f"{name}.{key}"
+            _emit_table(lines, child, item)
+    for name, mapping in enum_maps:
+        lines.append(f"[{prefix}.{name}]" if prefix else f"[{name}]")
+        for key, item in mapping.items():
+            lines.append(f"{_bare_key(_key(key))} = {_dump_scalar(item)}")
+        lines.append("")
+    for name, items in arrays:
+        header = f"{prefix}.{name}" if prefix else name
+        for item in items:
+            lines.append(f"[[{header}]]")
+            for key in type(item).model_fields:
+                lines.append(f"{key} = {_dump_scalar(getattr(item, key))}")
+            lines.append("")
 
-    perms = settings.permissions
-    lines.append("[permissions]")
-    for effect in EffectClass:
-        lines.append(f'"{effect.value}" = {dump(perms.defaults[effect].value)}')
-    lines.append("")
-    lines.append("[permissions.fs]")
-    lines.append(f"read_roots = {dump(perms.fs.read_roots)}")
-    lines.append(f"write_roots = {dump(perms.fs.write_roots)}")
-    lines.append("")
-    lines.append("[permissions.shell]")
-    lines.append(f"allow = {dump(perms.shell.allow)}")
-    lines.append(f"allow_metacharacters = {dump(perms.shell.allow_metacharacters)}")
-    lines.append("")
-    lines.append("[agent]")
-    for key, value in settings.agent.model_dump().items():
-        lines.append(f"{key} = {dump(value)}")
-    lines.append("")
-    return "\n".join(lines)
+
+def _dump_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, Enum):
+        return json.dumps(value.value)
+    if isinstance(value, str):
+        # `json.dumps` is a correct TOML basic-string escaper: it handles
+        # backslashes, quotes and control characters the same way.
+        return json.dumps(value)
+    if isinstance(value, Path):
+        return json.dumps(str(value))
+    if isinstance(value, list):
+        return "[" + ", ".join(_dump_scalar(v) for v in value) + "]"
+    if isinstance(value, dict):
+        pairs = ", ".join(
+            f"{json.dumps(_key(k))} = {_dump_scalar(v)}" for k, v in value.items()
+        )
+        return "{" + pairs + "}"
+    return str(value)
+
+
+def _key(value: Any) -> str:
+    return str(value.value) if isinstance(value, Enum) else str(value)
+
+
+def _bare_key(key: str) -> str:
+    """Quote a TOML key only when it has to be quoted."""
+    return key if key and all(c.isalnum() or c in "_-" for c in key) else json.dumps(key)
 
 
 class ConfigEditor:
@@ -554,29 +699,114 @@ class ConfigEditor:
     def set(self, dotted_key: str, raw_value: str) -> Any:
         value = _coerce(raw_value)
         parts = dotted_key.split(".")
+        if not parts or not all(parts):
+            raise ConfigError(f"unsupported config path {dotted_key!r}")
+
+        # `models` is a table per alias, which a dotted path cannot express
+        # generically (the middle segment is a user-chosen key, not a field).
+        if parts[0] == "models":
+            if len(parts) != 3:
+                raise ConfigError(
+                    f"{dotted_key!r}: expected models.<alias>.<field>"
+                )
+            return self._set_model_field(parts[1], parts[2], value)
+
+        container, field = self._walk(parts, dotted_key)
+        _refuse_if_structured(
+            dotted_key, getattr(container, field), config_file=self.config_file
+        )
+        setattr(container, field, _coerce_field(container, field, value, dotted_key))
+        return value
+
+    def _set_model_field(self, alias: str, field: str, value: Any) -> Any:
+        if alias not in self.settings.models:
+            self.settings.models[alias] = ModelSpec()
+        if field not in ModelSpec.model_fields:
+            raise ConfigError(f"unknown model field {field!r}")
+        spec = self.settings.models[alias]
+        _refuse_if_structured(
+            f"models.{alias}.{field}", getattr(spec, field), config_file=self.config_file
+        )
+        setattr(spec, field, _coerce_field(spec, field, value, f"models.{alias}.{field}"))
+        return value
+
+    def _walk(self, parts: list[str], dotted_key: str) -> tuple[Any, str]:
+        """Resolve a dotted path to (the object holding the field, field name).
+
+        Walks any depth rather than a hand-listed set of two-part paths. The
+        hand-listed version supported `agent.*` only, so `memory.vector_limit`
+        and `multi_agent.enabled` were documented knobs the CLI refused --
+        and a setting reachable only by hand-editing TOML is one most people
+        never find. `permissions.network.*` is three deep.
+        """
         if len(parts) == 1:
             if parts[0] not in Settings.model_fields:
                 raise ConfigError(f"unknown setting {dotted_key!r}")
-            setattr(self.settings, parts[0], value)
-        elif parts[0] == "models" and len(parts) == 3:
-            alias, field = parts[1], parts[2]
-            if alias not in self.settings.models:
-                self.settings.models[alias] = ModelSpec()
-            if field not in ModelSpec.model_fields:
-                raise ConfigError(f"unknown model field {field!r}")
-            setattr(self.settings.models[alias], field, value)
-        elif parts[0] == "agent" and len(parts) == 2:
-            if parts[1] not in AgentConfig.model_fields:
-                raise ConfigError(f"unknown agent field {parts[1]!r}")
-            setattr(self.settings.agent, parts[1], value)
-        else:
-            raise ConfigError(f"unsupported config path {dotted_key!r}")
-        return value
+            return self.settings, parts[0]
+
+        current: Any = self.settings
+        for depth, part in enumerate(parts[:-1]):
+            fields = getattr(type(current), "model_fields", None)
+            if fields is None or part not in fields:
+                raise ConfigError(f"unsupported config path {dotted_key!r}")
+            current = getattr(current, part)
+            if not isinstance(current, BaseModel):
+                raise ConfigError(
+                    f"{'.'.join(parts[: depth + 1])!r} is not a nested table"
+                )
+
+        final = parts[-1]
+        fields = getattr(type(current), "model_fields", None) or {}
+        if final not in fields:
+            raise ConfigError(f"unknown {parts[-2]} field {final!r}")
+        return current, final
 
     def save(self) -> Path:
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         self.config_file.write_text(config_to_toml(self.settings), encoding="utf-8")
         return self.config_file
+
+
+def _coerce_field(container: BaseModel, field: str, value: Any, dotted_key: str) -> Any:
+    """Validate one field against its annotation, in isolation.
+
+    `setattr` does not validate: pydantic only validates on construction
+    unless `validate_assignment` is on. Without this, `config set
+    sandbox.mode read-only` stores the raw string and the field's type
+    silently stops being `SandboxMode` -- the value compares equal today and
+    breaks the first time something does `is` or `model_dump(mode="json")`.
+
+    A single `TypeAdapter` rather than re-validating the whole model: the
+    rest of the object came from a file that already passed validation, and
+    rebuilding it to check one field would also re-run every validator.
+    """
+    adapter = TypeAdapter(type(container).model_fields[field].annotation)
+    try:
+        return adapter.validate_python(value)
+    except ValidationError as exc:
+        detail = exc.errors()[0]
+        raise ConfigError(
+            f"{dotted_key}: {detail.get('msg', 'invalid value')} "
+            f"(got {value!r})"
+        ) from exc
+
+
+def _refuse_if_structured(dotted_key: str, current: Any, *, config_file: Path) -> None:
+    """Refuse to assign a scalar to a table, a list or a mapping.
+
+    `_coerce` turns "true" into a bool and "3" into an int; assigning either
+    to a nested table raises a pydantic `ValidationError`, which reaches the
+    user as a traceback instead of a sentence telling them what to type.
+    """
+    if isinstance(current, BaseModel):
+        raise ConfigError(
+            f"{dotted_key!r} is a nested table; set one of its fields instead, "
+            f"e.g. {dotted_key}.<field>"
+        )
+    if isinstance(current, (list, dict)):
+        raise ConfigError(
+            f"{dotted_key!r} is a {type(current).__name__}; edit {config_file} directly"
+        )
 
 
 def _coerce(raw: str) -> Any:

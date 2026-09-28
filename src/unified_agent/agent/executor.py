@@ -31,6 +31,9 @@ from unified_agent.types import ToolCall, ToolResult, idempotency_key
 # Tools whose result the runtime intercepts instead of just logging.
 PLAN_TOOL = "update_plan"
 FINISH_TOOL = "finish"
+# Not intercepted -- but the runtime does observe it, to record which skills
+# a task used (see `AgentRuntime._note_skill_loaded`).
+SKILL_TOOL = "load_skill"
 
 
 class ToolRunner:
@@ -216,6 +219,22 @@ class ToolRunner:
         self.store.append(
             state.task_id, EventType.LOG_APPENDED, {"entry": entry.model_dump(mode="json")}
         )
+        if replay_reason:
+            # A re-run after an interrupt is a different thing from a first
+            # run, and `TOOL_STARTED` alone cannot say which happened. Without
+            # this event the only trace of a replay is a flag inside a log
+            # entry, which is not queryable.
+            self.store.append(
+                state.task_id,
+                EventType.TOOL_REPLAYED,
+                {
+                    "call_id": call_id,
+                    "name": call.name,
+                    "reason": replay_reason,
+                    "attempt": attempt,
+                    "idempotency_key": key,
+                },
+            )
         return entry
 
     # -- helpers ----------------------------------------------------------

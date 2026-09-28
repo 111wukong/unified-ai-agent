@@ -296,6 +296,15 @@ def replay(events: list, *, task_id: str, session_id: str = "") -> AgentState:
             state.pending_confirmation = None
             state.status = TaskStatus.RUNNING
 
+        elif kind is EventType.SKILL_LOADED:
+            # Folded rather than kept in memory: a resume rebuilds state from
+            # events alone, so a loaded-skill list that only lived in RAM
+            # would silently vanish and the task-end attribution would be
+            # missing exactly the skills that were used before the crash.
+            name = payload.get("name")
+            if name and name not in state.loaded_skills:
+                state.loaded_skills.append(name)
+
         elif kind is EventType.STATE_TRANSITION:
             target = payload.get("to")
             if target:
