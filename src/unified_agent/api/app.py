@@ -144,6 +144,14 @@ class Service:
 
         def _done(_: asyncio.Task) -> None:
             self.running.pop(task_id, None)
+            # Wake any subscriber still waiting on this task so it finalises
+            # instead of sitting out the idle timeout. Uses `self.agent`
+            # directly, not the `a` property: that raises an HTTPException
+            # when the service is not ready, and raising inside a done
+            # callback is an unraisable error rather than a 503.
+            agent = self.agent
+            if agent is not None and agent.bus is not None:
+                agent.bus.close_task(task_id)
 
         task.add_done_callback(_done)
         return task
@@ -318,8 +326,26 @@ def create_app(
 
     # -- inventory --------------------------------------------------------
     @app.get("/api/v1/tools")
-    async def list_tools() -> list[dict[str, Any]]:
-        return svc.a.registry.describe()
+    async def list_tools(effect: str | None = None) -> list[dict[str, Any]]:
+        """Registered tools, optionally filtered to one effect class.
+
+        The filter matters for reviewing the permission surface: "what can
+        this runtime execute, or reach over the network" is one request
+        rather than a scan of the whole catalogue.
+        """
+        wanted: EffectClass | None = None
+        if effect is not None:
+            try:
+                wanted = EffectClass(effect)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"unknown effect {effect!r}; expected one of "
+                        f"{', '.join(e.value for e in EffectClass)}"
+                    ),
+                ) from exc
+        return svc.a.registry.describe(effect=wanted)
 
     @app.get("/api/v1/skills")
     async def list_skills() -> list[dict[str, Any]]:
@@ -529,7 +555,7 @@ def _encode(encoder: agui.AgUiEncoder, item: Any) -> list[dict[str, Any]]:
         return encoder.on_delta(item)
     if item.kind == "notice":
         return [agui.custom("stream_notice", {"notice": item.notice, "dropped": item.dropped})]
-    if item.kind == "event" and item.event is not None:
+    if item.is_durable and item.event is not None:
         return encoder.on_event(item.event)
     return []
 
@@ -601,7 +627,7 @@ async def _agui_events(
             for encoded in _encode(encoder, item):
                 yield encoded
 
-            if item.kind != "event" or item.event is None:
+            if not item.is_durable or item.event is None:
                 continue
             kind = item.event.type
             if kind is EventType.CONFIRMATION_REQUESTED:
@@ -696,17 +722,6 @@ def _last_user_message(payload: AgUiRunInput) -> str:
         if message.role == "user" and message.content.strip():
             return message.content.strip()
     return ""
-
-
-def _state_snapshot_for(svc: Service, task_id: str) -> dict[str, Any]:
-    task = svc.a.store.get_task(task_id)
-    state = replay(svc.a.store.events(task_id), task_id=task_id, session_id=task["session_id"])
-    return {
-        "status": state.status.value,
-        "plan": [{"id": s.id, "description": s.description, "status": s.status.value} for s in state.plan],
-        "stepsUsed": state.steps_used,
-        "tokens": state.usage.total_tokens,
-    }
 
 
 __all__ = ["create_app", "Service", "app"]

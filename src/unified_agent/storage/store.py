@@ -77,14 +77,31 @@ class Store:
         *,
         redactor: Redactor | None = None,
         sink: Any = None,
+        read_only: bool = False,
     ) -> None:
-        self.conn = connect(db_path)
+        self.conn = connect(db_path, read_only=read_only)
         self.redactor = redactor or DEFAULT_REDACTOR
         # Optional JsonlSink. Every durable event is mirrored to the append-only
         # log file, because the DB is mutable in principle and the JSONL is not.
         self.sink = sink
         self._lock = threading.RLock()
         self._vector_index: Any = None
+
+    @classmethod
+    def readonly(cls, db_path: Path | str) -> "Store":
+        """A store that cannot write, for read-only commands.
+
+        A read path that can write is a read path whose bug corrupts the
+        store, and the CLI opens the database for every listing it prints.
+
+        Falls back to a normal open when the file does not exist yet: a
+        read-only connection cannot create the file, and "nothing has been
+        recorded yet" must not be an error.
+        """
+        path = Path(db_path)
+        if not path.exists():
+            return cls(path)
+        return cls(path, read_only=True)
 
     def close(self) -> None:
         with self._lock:
@@ -227,21 +244,40 @@ class Store:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def list_tasks(self, *, session_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    def list_tasks(
+        self,
+        *,
+        session_id: str | None = None,
+        statuses: Iterable[str] | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Newest first. `statuses` filters on the projection's status column.
+
+        Filtering here rather than by a point lookup on a single task is the
+        honest shape: the projection is what a list view is for, whereas
+        `resume` must decide from the event fold (see `AgentRuntime.resume`).
+        A point lookup that read the projection would be a second, staler
+        answer to "can this be resumed".
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
         if session_id:
-            rows = self.conn.execute(
-                "SELECT id,session_id,parent_task_id,goal,status,steps_used,tokens_in,"
-                "tokens_out,cost_usd,created_at,updated_at FROM tasks WHERE session_id=? "
-                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
-                (session_id, limit),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT id,session_id,parent_task_id,goal,status,steps_used,tokens_in,"
-                "tokens_out,cost_usd,created_at,updated_at FROM tasks"
-                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            clauses.append("session_id=?")
+            params.append(session_id)
+        if statuses is not None:
+            wanted = list(statuses)
+            if not wanted:
+                return []
+            clauses.append(f"status IN ({','.join('?' * len(wanted))})")
+            params.extend(wanted)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = self.conn.execute(
+            "SELECT id,session_id,parent_task_id,goal,status,steps_used,tokens_in,"
+            "tokens_out,cost_usd,created_at,updated_at FROM tasks"
+            f"{where} ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def save_projection(
@@ -279,12 +315,6 @@ class Store:
                     task_id,
                 ),
             )
-
-    def find_resumable(self, task_id: str) -> dict[str, Any] | None:
-        task = self.get_task(task_id)
-        if task and task["status"] in {"pending", "planning", "running", "waiting_confirmation"}:
-            return task
-        return None
 
     # ------------------------------------------------------------------
     # tool-call ledger (write-ahead)
@@ -348,12 +378,6 @@ class Store:
     def tool_call(self, call_id: str) -> ToolCallRecord | None:
         row = self.conn.execute("SELECT * FROM tool_calls WHERE id=?", (call_id,)).fetchone()
         return ToolCallRecord(row) if row else None
-
-    def calls_by_key(self, key: str) -> list[ToolCallRecord]:
-        rows = self.conn.execute(
-            "SELECT * FROM tool_calls WHERE idempotency_key=? ORDER BY attempt ASC, rowid ASC", (key,)
-        ).fetchall()
-        return [ToolCallRecord(r) for r in rows]
 
     def unfinished_calls(self, task_id: str) -> list[ToolCallRecord]:
         """Calls that were written-ahead but never reached a terminal state.
@@ -596,6 +620,18 @@ class Store:
         """Store a vector under `model`. Pass `dim` to assert the expected size."""
         with self._lock:
             self.vectors.upsert(memory_id, vector, model=model, dim=dim)
+
+    def put_vectors(
+        self, rows: list[tuple[str, list[float]]], *, model: str, dim: int | None = None
+    ) -> int:
+        """Batch form of `put_vector`, for the reindex path.
+
+        One lock acquisition for the whole batch rather than one per row, so a
+        reindex of a few thousand memories does not hold and release the lock
+        a few thousand times.
+        """
+        with self._lock:
+            return self.vectors.upsert_many(rows, model=model, dim=dim)
 
     def search_vectors(
         self,

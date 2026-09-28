@@ -32,14 +32,29 @@ StreamCallback = Callable[[str], Awaitable[None] | None]
 
 
 class ModelCapabilities(BaseModel):
+    """What a provider can do, before user overrides.
+
+    Every field here is read by something. That is a rule, not an
+    observation: `vision` used to sit in this list and nothing consulted it,
+    which made it a capability flag that could only mislead -- the runtime
+    cannot put an image in a message, so a model marked vision-capable still
+    could not be asked to look at one. It comes back with the feature.
+    """
+
     native_tool_calling: bool = True
+    #: Whether the provider accepts a request-side flag asking it to emit
+    #: several tool calls in one turn. Adapters whose API has no such flag
+    #: (Anthropic) simply do not read it; the runtime handles multiple calls
+    #: either way, so this changes the request, never the loop.
     parallel_tool_calls: bool = False
     json_schema: bool = False
     json_object: bool = False
     streaming: bool = True
-    vision: bool = False
     prompt_cache: bool = False
     max_context_tokens: int = 128_000
+    #: Hard ceiling on output tokens. `ModelSpec.max_output_tokens` is the
+    #: per-request budget; this is what the model can physically emit, and
+    #: the request is clamped to it.
     max_output_tokens: int = 8_192
 
     def merged(self, overrides: dict[str, Any]) -> "ModelCapabilities":
@@ -89,7 +104,15 @@ class ChatModel(ABC):
             tools=tools,
             temperature=self.spec.temperature if temperature is None else temperature,
             response_format=response_format,
-            max_output_tokens=max_output_tokens or self.spec.max_output_tokens,
+            # Clamped to the model's own ceiling. Asking a provider for more
+            # output tokens than it can emit is a config mistake, and the
+            # failure is a 400 in the middle of a task rather than a sentence
+            # at startup -- so the capability is the ceiling and the spec is
+            # the budget.
+            max_output_tokens=min(
+                max_output_tokens or self.spec.max_output_tokens,
+                self.capabilities.max_output_tokens,
+            ),
             stream=stream if self.capabilities.streaming else None,
         )
         resp.provider = self.provider

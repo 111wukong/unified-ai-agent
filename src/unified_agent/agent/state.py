@@ -200,14 +200,6 @@ class AgentState(BaseModel):
         step = self.active_step()
         return step.id if step else f"step_{self.current_step}"
 
-    def all_steps_done(self) -> bool:
-        return bool(self.plan) and all(
-            s.status in {StepStatus.COMPLETED, StepStatus.SKIPPED} for s in self.plan
-        )
-
-    def recent_tools(self, n: int = 8) -> list[str]:
-        return [e.tool for e in self.log if e.tool][-n:]
-
     def snapshot(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
 

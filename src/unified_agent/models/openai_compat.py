@@ -34,7 +34,6 @@ class OpenAICompatModel(ChatModel):
             json_schema=is_openai,
             json_object=True,
             streaming=True,
-            vision=is_openai,
             prompt_cache=is_openai,
             max_context_tokens=128_000,
             max_output_tokens=8_192,
@@ -71,6 +70,12 @@ class OpenAICompatModel(ChatModel):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+            # Request-side flag, and only where the provider has one: real
+            # OpenAI accepts it, gateways and local servers often reject an
+            # unknown field. `parallel_tool_calls` in the capability matrix
+            # is what decides, so a user override actually changes the wire.
+            if self.capabilities.parallel_tool_calls:
+                payload["parallel_tool_calls"] = True
         if response_format:
             payload["response_format"] = response_format
         if stream:

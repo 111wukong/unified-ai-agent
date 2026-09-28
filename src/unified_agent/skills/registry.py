@@ -66,7 +66,6 @@ class SkillRegistry:
         self.status_overrides = dict(status_overrides or {})
         self.on_promote = on_promote
         self._skills: dict[str, Skill] = {}
-        self._candidates: set[str] = set()
 
     # -- discovery --------------------------------------------------------
     def discover(self, *, known_tools: set[str] | None = None) -> LoadResult:
@@ -91,8 +90,6 @@ class SkillRegistry:
                     errors.append((skill_md, f"blocked by security review: {report.worst}"))
                     continue
                 self._skills[skill.name] = skill
-                if is_candidate:
-                    self._candidates.add(skill.name)
                 loaded.append(skill)
         return LoadResult(loaded=loaded, errors=errors, reports=reports)
 
@@ -130,10 +127,6 @@ class SkillRegistry:
     def names(self) -> list[str]:
         return [s.name for s in self.active()]
 
-    def is_candidate(self, name: str) -> bool:
-        """True when the skill came from the agent's own candidate root."""
-        return name in self._candidates
-
     def pending_review(self) -> list[Skill]:
         """Skills that need a human decision before they can run.
 
@@ -162,18 +155,6 @@ class SkillRegistry:
         ]
         lines += [s.index_line() for s in skills]
         return "\n".join(lines)
-
-    def allowed_tools_for(self, names: list[str]) -> set[str]:
-        out: set[str] = set()
-        for name in names:
-            skill = self.get(name)
-            if skill and skill.status == "active":
-                out |= skill.allowed_tools
-        return out
-
-    def tool_catalog_block(self, name: str) -> str:
-        skill = self.get(name)
-        return f"\n\n# Skill: {skill.name}\n{skill.render()}" if skill else ""
 
     # -- lifecycle --------------------------------------------------------
     def promote(self, name: str, to: str) -> Skill:

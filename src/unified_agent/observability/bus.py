@@ -163,10 +163,13 @@ class EventBus:
     def has_subscribers(self, task_id: str) -> bool:
         return bool(self._subscribers.get(task_id))
 
-    def subscriber_count(self, task_id: str) -> int:
-        return len(self._subscribers.get(task_id) or ())
-
     def close_task(self, task_id: str) -> None:
+        """Tell every subscriber this task is over.
+
+        Called when a run finishes. Without it a client that attached without
+        replay waits out the idle timeout before noticing the task is done --
+        the stream does eventually end, but only by giving up.
+        """
         for sub in tuple(self._subscribers.pop(task_id, ())):
             with contextlib.suppress(asyncio.QueueFull):
                 sub.queue.put_nowait(

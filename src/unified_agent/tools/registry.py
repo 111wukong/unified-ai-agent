@@ -21,9 +21,6 @@ class ToolRegistry:
             raise ToolError(f"duplicate tool name {name!r}")
         self._tools[name] = tool
 
-    def unregister(self, name: str) -> None:
-        self._tools.pop(name, None)
-
     def get(self, name: str) -> Tool:
         try:
             return self._tools[name]
@@ -51,13 +48,21 @@ class ToolRegistry:
         return "\n".join(t.spec.as_prompt_line() for t in self.list())
 
     def by_effect(self, effect: EffectClass) -> list[Tool]:
+        """Tools in one effect class.
+
+        The reason this exists rather than a filter at the call site: "what
+        can this runtime actually execute / write / reach over the network"
+        is the question you ask when reviewing the permission surface, and it
+        should be answerable from one place.
+        """
         return [t for t in self.list() if t.spec.effect_class is effect]
 
     def validate_args(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         tool = self.get(name)
         return validate_against(tool.spec.parameters, args)
 
-    def describe(self) -> list[dict[str, Any]]:
+    def describe(self, *, effect: EffectClass | None = None) -> list[dict[str, Any]]:
+        tools = self.by_effect(effect) if effect is not None else self.list()
         return [
             {
                 "name": t.spec.name,
@@ -67,7 +72,7 @@ class ToolRegistry:
                 "requires_confirmation": t.spec.requires_confirmation,
                 "description": t.spec.description,
             }
-            for t in self.list()
+            for t in tools
         ]
 
 

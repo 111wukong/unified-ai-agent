@@ -597,7 +597,6 @@ class TestStoreReadPathsSmoke:
         store.last_seq(task)
         store.list_tool_calls(task)
         store.unfinished_calls(task)
-        store.calls_by_key("no-such-key")
         store.list_artifacts(task)
         store.list_memories()
         store.list_memories(scope="project")
@@ -613,7 +612,12 @@ class TestStoreReadPathsSmoke:
         store.vectors.count()
         store.vectors.models()
         store.vectors.missing(model="hashing")
+        store.vectors.stale_model(model="hashing", dim=256)
         store.list_skills()
+        store.skill_statuses()
+        store.list_skill_runs()
+        store.skill_run_counts()
+        store.list_tasks(statuses=["completed"])
 
     def test_an_empty_store_answers_without_erroring(self, tmp_path: Path) -> None:
         empty = Store(tmp_path / "empty.db")

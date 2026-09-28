@@ -349,7 +349,7 @@ class AgentRuntime:
                 self._progress("assistant", {"text": resp.content})
 
             # --- no tool call: the answer ------------------------------
-            if not resp.tool_calls:
+            if not resp.wants_tools:
                 return self._complete(state, resp.content or "(the model returned no content)", started)
 
             # --- execute ------------------------------------------------

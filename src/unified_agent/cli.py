@@ -83,6 +83,18 @@ def _settings(
         raise typer.Exit(2) from exc
 
 
+def _read_store(settings: Settings):
+    """Open the database for a command that only reads.
+
+    Every listing command used to open a writable connection. A read path
+    that *can* write is a read path whose bug corrupts the store, so the
+    read-only commands go through here instead.
+    """
+    from unified_agent.storage.store import Store
+
+    return Store.readonly(settings.db_path)
+
+
 def _parse_effects(raw: list[str]) -> tuple[EffectClass, ...]:
     out: list[EffectClass] = []
     for item in raw:
@@ -246,6 +258,70 @@ def init(
     )
 
 
+def _store_health(settings: Settings, *, sample: int = 20) -> list[tuple[str, str]]:
+    """Compare the stored projection against the event fold.
+
+    `tasks.state` is written on every step and read by nothing, while the
+    project's central claim is "events are truth, the projection is a cache
+    and is wrong by construction if the two disagree". That claim is only
+    worth anything if something checks it, so this does.
+
+    Sampling the most recent N tasks keeps `uaa doctor` fast on a large
+    database while still catching a projection that has stopped being
+    updated.
+    """
+    from unified_agent.agent.state import replay
+    from unified_agent.storage.store import Store
+
+    if not settings.db_path.exists():
+        return [("store", "[dim]not created yet[/dim]")]
+
+    store = Store.readonly(settings.db_path)
+    try:
+        tasks = store.list_tasks(limit=sample)
+        drift: list[str] = []
+        for task in tasks:
+            full = store.get_task(task["id"]) or {}
+            state = replay(store.events(task["id"]), task_id=task["id"])
+            if full.get("status") != state.status.value:
+                drift.append(f"{task['id']} status")
+            elif int(full.get("steps_used") or 0) != state.steps_used:
+                drift.append(f"{task['id']} steps")
+        ambiguous = sum(
+            1
+            for task in tasks
+            for record in store.list_tool_calls(task["id"])
+            if record.status == "ambiguous"
+        )
+    finally:
+        store.close()
+
+    rows: list[tuple[str, str]] = []
+    if not tasks:
+        rows.append(("store", "[dim]no tasks recorded[/dim]"))
+    elif drift:
+        rows.append(
+            (
+                "projection",
+                f"[red]{len(drift)}/{len(tasks)} disagree with the event log[/red] "
+                f"[dim]({', '.join(drift[:3])})[/dim]",
+            )
+        )
+    else:
+        rows.append(
+            ("projection", f"[green]{len(tasks)} task(s) agree with the event log[/green]")
+        )
+    if ambiguous:
+        rows.append(
+            (
+                "ambiguous calls",
+                f"[yellow]{ambiguous}[/yellow] [dim](outcome unknown after an "
+                "interrupt; may have run)[/dim]",
+            )
+        )
+    return rows
+
+
 @app.command()
 def doctor(
     home: Optional[Path] = typer.Option(None, "--home"),
@@ -308,6 +384,8 @@ def doctor(
     )
     for d in default_skill_dirs(settings):
         table.add_row(f"skill dir {d.name}", "[green]exists[/green]" if d.is_dir() else "[dim]missing[/dim]")
+    for label, detail in _store_health(settings):
+        table.add_row(label, detail)
     console.print(table)
 
     leaks = _check_shell_rc_for_keys()
@@ -345,9 +423,22 @@ def tools(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
     show_schema: bool = typer.Option(False, "--schema", help="Print JSON schemas."),
+    effect: Optional[str] = typer.Option(
+        None, "--effect", help="Only tools in one effect class, e.g. execute_local."
+    ),
 ) -> None:
     """List the registered tools and their permission class."""
     settings = _settings(home, workspace)
+    wanted: Optional[EffectClass] = None
+    if effect:
+        try:
+            wanted = EffectClass(effect)
+        except ValueError as exc:
+            err_console.print(
+                f"unknown effect {effect!r}; expected one of "
+                f"{', '.join(e.value for e in EffectClass)}"
+            )
+            raise typer.Exit(2) from exc
 
     async def _run() -> None:
         agent = await build_agent(settings=settings)
@@ -359,7 +450,7 @@ def tools(
             table.add_column("idempotent")
             table.add_column("source")
             table.add_column("description", overflow="fold")
-            for item in agent.registry.describe():
+            for item in agent.registry.describe(effect=wanted):
                 decision = settings.permissions.defaults[EffectClass(item["effect"])]
                 table.add_row(
                     item["name"],
@@ -557,19 +648,30 @@ def chat(
 def task_list(
     limit: int = typer.Option(20, "--limit", "-n"),
     session: Optional[str] = typer.Option(None, "--session"),
+    resumable: bool = typer.Option(
+        False, "--resumable", help="Only tasks that can still be picked up."
+    ),
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
     """List recent tasks."""
     settings = _settings(home, None)
-    from unified_agent.storage.store import Store
+    from unified_agent.agent.state import RESUMABLE_STATUSES
 
-    store = Store(settings.db_path)
+    store = _read_store(settings)
     try:
-        rows = store.list_tasks(session_id=session, limit=limit)
+        rows = store.list_tasks(
+            session_id=session,
+            statuses=[s.value for s in RESUMABLE_STATUSES] if resumable else None,
+            limit=limit,
+        )
     finally:
         store.close()
     if not rows:
-        console.print("[dim]no tasks[/dim]")
+        console.print(
+            "[dim]no resumable tasks[/dim]"
+            if resumable
+            else "[dim]no tasks[/dim]"
+        )
         return
     table = Table(show_header=True, header_style="bold")
     for column in ("id", "status", "steps", "tokens", "cost", "goal"):
@@ -595,9 +697,8 @@ def task_show(
     """Show a task's plan, log and ledger."""
     settings = _settings(home, None)
     from unified_agent.agent.state import replay
-    from unified_agent.storage.store import Store
 
-    store = Store(settings.db_path)
+    store = _read_store(settings)
     try:
         task = store.get_task(task_id)
         if task is None:
@@ -665,9 +766,8 @@ def task_events(
 ) -> None:
     """Print the event stream (the source of truth)."""
     settings = _settings(home, None)
-    from unified_agent.storage.store import Store
 
-    store = Store(settings.db_path)
+    store = _read_store(settings)
     try:
         events = store.events(task_id)
     finally:
@@ -767,9 +867,8 @@ def memory_list(
 ) -> None:
     """List stored memories."""
     settings = _settings(home, None)
-    from unified_agent.storage.store import Store
 
-    store = Store(settings.db_path)
+    store = _read_store(settings)
     try:
         rows = store.list_memories(scope=scope, limit=limit)
     finally:
@@ -800,9 +899,8 @@ def memory_search(
     """
     settings = _settings(home, workspace)
     from unified_agent.memory import build_memory_service
-    from unified_agent.storage.store import Store
 
-    store = Store(settings.db_path)
+    store = _read_store(settings)
     try:
         memory = build_memory_service(settings=settings, store=store)
         rows = asyncio.run(memory.recall(query, limit=limit, mode=mode))
@@ -831,9 +929,8 @@ def memory_stats(
     """What is stored, and whether vector search is actually available."""
     settings = _settings(home, workspace)
     from unified_agent.memory import build_memory_service
-    from unified_agent.storage.store import Store
 
-    store = Store(settings.db_path)
+    store = _read_store(settings)
     try:
         stats = build_memory_service(settings=settings, store=store).stats()
     finally:
@@ -859,6 +956,13 @@ def memory_stats(
     console.print(f"vectors:     {vectors['vectors']}")
     for entry in vectors["models"]:
         console.print(f"  {escape(str(entry['model']))} dim={entry['dim']} n={entry['count']}")
+    stale = int(stats.get("stale_vectors") or 0)
+    if stale:
+        console.print(
+            f"stale:       [yellow]{stale}[/yellow] "
+            "[dim](built with a different embedding model; invisible to search)[/dim]"
+        )
+        console.print("[dim]Run [cyan]uaa memory reindex[/cyan] to rebuild them.[/dim]")
     if not stats["semantic"]:
         console.print()
         console.print(
@@ -906,9 +1010,8 @@ def memory_history(
     """
     settings = _settings(home, workspace)
     from unified_agent.memory import build_memory_service
-    from unified_agent.storage.store import Store
 
-    store = Store(settings.db_path)
+    store = _read_store(settings)
     try:
         chain = build_memory_service(settings=settings, store=store).history(memory_id)
     finally:
@@ -981,18 +1084,22 @@ _SKILL_STATUS_STYLE = {
 }
 
 
-def _skill_registry(settings: Any):
+def _skill_registry(settings: Any, *, write: bool = False):
     """A registry wired to the stored ladder, without building a whole agent.
 
     `build_agent` would connect MCP servers and load models to answer a
     question about a directory listing. What this needs from the store is
     only the status column.
+
+    `write=True` only for `promote`: everything else about a skill listing is
+    a read, and a read that opens a writable connection is a read whose bug
+    can corrupt the store.
     """
     from unified_agent.agent.factory import candidate_skill_dirs, store_skills
     from unified_agent.skills.registry import SkillRegistry
     from unified_agent.storage.store import Store
 
-    store = Store(settings.db_path)
+    store = Store(settings.db_path) if write else Store.readonly(settings.db_path)
     registry = SkillRegistry(
         default_skill_dirs(settings),
         candidate_dirs=candidate_skill_dirs(settings),
@@ -1069,7 +1176,7 @@ def skill_promote(
     is reachable from anywhere.
     """
     settings = _settings(home, workspace)
-    registry, store = _skill_registry(settings)
+    registry, store = _skill_registry(settings, write=True)
     try:
         registry.discover()
         try:
@@ -1161,9 +1268,8 @@ def skill_runs(
     loaded often and never finishes a task is a skill to retire.
     """
     settings = _settings(home, workspace)
-    from unified_agent.storage.store import Store
 
-    store = Store(settings.db_path)
+    store = _read_store(settings)
     try:
         rows = store.list_skill_runs(skill_name=name)
     finally:

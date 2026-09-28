@@ -96,7 +96,6 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     finished_at     TEXT,
     duration_ms     INTEGER
 );
-CREATE INDEX IF NOT EXISTS ix_tool_calls_key    ON tool_calls(idempotency_key);
 CREATE INDEX IF NOT EXISTS ix_tool_calls_task   ON tool_calls(task_id, started_at);
 CREATE INDEX IF NOT EXISTS ix_tool_calls_status ON tool_calls(status);
 

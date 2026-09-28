@@ -344,7 +344,7 @@ class TestCandidateRoot:
 
         assert sorted(s.name for s in result.loaded) == ["invented", "shipped"]
         assert registry.get("invented").status == "candidate"
-        assert registry.is_candidate("invented")
+        assert registry.get("invented").source == "candidate"
         assert registry.names() == ["shipped"], "a candidate must not reach the prompt index"
         assert "invented" not in registry.index_prompt()
 

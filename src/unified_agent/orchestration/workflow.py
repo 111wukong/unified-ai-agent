@@ -191,9 +191,6 @@ class Workflow:
     def outgoing(self, node_id: str) -> list[Edge]:
         return [e for e in self.edges if e.source == node_id]
 
-    def incoming(self, node_id: str) -> list[Edge]:
-        return [e for e in self.edges if e.target == node_id]
-
     def successors(self, node_id: str) -> list[str]:
         """Where control can go next, *including* branches and loop bodies.
 

@@ -105,6 +105,21 @@ class MemoryService:
         data["embeddings"] = self.embeddings.describe()
         data["semantic"] = self.embeddings.semantic
         data["vector_key"] = self.vector_key if self.embeddings.available else None
+        # Vectors built under a previous embedding model are invisible to
+        # search -- the query filters by key -- so changing
+        # `memory.embedding_model` silently narrows retrieval to whatever was
+        # indexed since. Counting them is what turns that into a visible,
+        # fixable state ("run `uaa memory reindex`").
+        #
+        # Skipped while `dim` is still 0: before the first embed the
+        # dimension is unknown and every stored row would look stale.
+        dim = self.embeddings.dim
+        stale = (
+            self.store.vectors.stale_model(model=self.vector_key, dim=dim)
+            if self.embeddings.available and dim
+            else []
+        )
+        data["stale_vectors"] = len(stale)
         return data
 
     def history(self, memory_id: str) -> list[dict[str, Any]]:
@@ -197,10 +212,15 @@ class MemoryService:
             if not contents:
                 continue
             vectors = await self.embeddings.embed(contents)
-            for memory_id, vector in zip(batch_ids, vectors, strict=False):
-                if vector:
-                    self.store.put_vector(memory_id, vector, model=model)
-                    embedded += 1
+            written = self.store.put_vectors(
+                [
+                    (memory_id, vector)
+                    for memory_id, vector in zip(batch_ids, vectors, strict=False)
+                    if vector
+                ],
+                model=model,
+            )
+            embedded += written
         return {
             "embedded": embedded,
             "pending": len(pending),

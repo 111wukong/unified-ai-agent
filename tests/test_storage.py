@@ -132,8 +132,12 @@ class TestToolCallLedger:
         self._begin(store, task, attempt=1)
         self._begin(store, task, attempt=2)
 
-        rows = store.calls_by_key("key1")
+        rows = store.list_tool_calls(task)
         assert [r.attempt for r in rows] == [1, 2]
+        # Same logical call, so both attempts carry the same key -- which is
+        # what makes "did this exact call run twice?" answerable from the
+        # per-task ledger without a separate key index.
+        assert {r.idempotency_key for r in rows} == {"key1"}
         assert len(store.unfinished_calls(task)) == 2
 
     def test_ambiguous_is_a_terminal_state(self, store: Store) -> None:
@@ -226,13 +230,18 @@ class TestTaskListing:
         goals = [t["goal"] for t in store.list_tasks(session_id=sid)]
         assert goals[0] == "third"
 
-    def test_find_resumable_ignores_terminal_tasks(self, store: Store) -> None:
-        sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
-        task = store.create_task(session_id=sid, goal="g")
-        assert store.find_resumable(task) is not None
+    def test_listing_can_filter_to_what_is_still_resumable(self, store: Store) -> None:
+        """`uaa task list --resumable`.
 
+        The filter lives on the listing rather than on a point lookup: a list
+        view is exactly what the projection is for, while `resume` itself
+        must decide from the event fold.
+        """
+        sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
+        live = store.create_task(session_id=sid, goal="live")
+        done = store.create_task(session_id=sid, goal="done")
         store.save_projection(
-            task,
+            done,
             status="completed",
             state={},
             steps_used=1,
@@ -240,4 +249,10 @@ class TestTaskListing:
             tokens_out=0,
             cost_usd=0.0,
         )
-        assert store.find_resumable(task) is None
+
+        resumable = store.list_tasks(statuses=["pending", "planning", "running"])
+        assert [t["id"] for t in resumable] == [live]
+
+        # An empty filter means "none", not "no filter": the caller asked for
+        # an empty set of statuses.
+        assert store.list_tasks(statuses=[]) == []

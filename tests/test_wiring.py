@@ -17,6 +17,7 @@ knob or an event without one is how the previous batch got in.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -26,15 +27,17 @@ from tests.conftest import ScriptedModel, ScriptedModels
 
 from unified_agent.agent.factory import build_agent
 from unified_agent.agent.state import replay
+from unified_agent.config import ModelSpec
 from unified_agent.errors import ModelError
 from unified_agent.models.mock import MockModel
 from unified_agent.observability.events import EventType
 from unified_agent.storage.store import Store
 from unified_agent.tools.base import ToolContext
 from unified_agent.tools import net as net_module
+from unified_agent.tools.fs import FS_TOOLS
 from unified_agent.tools.net import HttpGetTool
 from unified_agent.tools.shell import RunCommandTool, build_shell_tools
-from unified_agent.types import idempotency_key
+from unified_agent.types import EffectClass, idempotency_key
 
 
 def ctx_for(workspace: Path, home: Path) -> ToolContext:
@@ -429,3 +432,243 @@ class TestSkillLoadedEvent:
             agent.close()
 
         assert state.loaded_skills == ["reviewer"]
+
+
+# ---------------------------------------------------------------------------
+# capability matrix
+# ---------------------------------------------------------------------------
+
+
+class TestCapabilityMatrix:
+    """Every field in `ModelCapabilities` is read by something.
+
+    `vision` used to sit in that list with no reader. A capability flag
+    nothing consults can only mislead: the runtime cannot put an image in a
+    message, so a model marked vision-capable still cannot be asked to look
+    at one.
+    """
+
+    def test_vision_was_removed_rather_than_left_dangling(self, settings) -> None:  # noqa: ANN001
+        from unified_agent.models.base import ModelCapabilities
+
+        assert "vision" not in ModelCapabilities.model_fields
+        caps = ModelCapabilities()
+        with pytest.raises(ValueError, match="unknown capability overrides"):
+            caps.merged({"vision": True})
+
+    def test_the_output_ceiling_clamps_the_request(self) -> None:
+        """`ModelSpec.max_output_tokens` is the budget; the capability is
+        what the model can physically emit.
+
+        Asking for more than the ceiling is a config mistake whose failure
+        mode is a provider 400 in the middle of a task, so the request is
+        clamped instead.
+        """
+        from unified_agent.models.base import ChatModel, ModelCapabilities
+        from unified_agent.types import ModelResponse
+
+        class Recording(ChatModel):
+            provider = "recording"
+            seen: int | None = None
+
+            def declared_capabilities(self) -> ModelCapabilities:
+                return ModelCapabilities(max_output_tokens=1_000)
+
+            async def _chat(self, messages, **kwargs):  # noqa: ANN001, ANN003
+                Recording.seen = kwargs["max_output_tokens"]
+                return ModelResponse(content="ok")
+
+        spec = ModelSpec(provider="mock", model="m", max_output_tokens=9_999)
+        model = Recording(spec)
+        asyncio.run(model.chat([]))
+        assert Recording.seen == 1_000
+
+        # Under the ceiling, the spec wins.
+        Recording.seen = None
+        asyncio.run(model.chat([], max_output_tokens=250))
+        assert Recording.seen == 250
+
+    def test_parallel_tool_calls_reaches_the_wire(self) -> None:
+        """The flag is what a user override actually changes."""
+        from unified_agent.models.openai_compat import OpenAICompatModel
+
+        captured: dict[str, Any] = {}
+
+        class FakeResponse:
+            status_code = 200
+            text = "{}"
+            headers: dict[str, str] = {}
+
+            def json(self) -> dict[str, Any]:
+                return {"choices": [{"message": {"content": "hi"}}]}
+
+        class FakeClient:
+            async def __aenter__(self) -> "FakeClient":
+                return self
+
+            async def __aexit__(self, *exc: Any) -> bool:
+                return False
+
+            async def post(self, url: str, *, headers: Any, json: Any) -> FakeResponse:
+                captured.update(json)
+                return FakeResponse()
+
+        import unified_agent.models.openai_compat as module
+
+        original = module.httpx.AsyncClient
+        module.httpx.AsyncClient = lambda **kw: FakeClient()  # type: ignore[assignment]
+        try:
+            tools = [{"type": "function", "function": {"name": "x", "parameters": {}}}]
+            # Real OpenAI (no base_url) declares the capability.
+            openai_like = OpenAICompatModel(ModelSpec(provider="openai_compat", model="gpt"))
+            asyncio.run(openai_like.chat([], tools=tools))
+            assert captured.get("parallel_tool_calls") is True
+
+            captured.clear()
+            # A gateway does not, and must not receive an unknown field.
+            gateway = OpenAICompatModel(
+                ModelSpec(provider="openai_compat", model="qwen", base_url="http://x/v1")
+            )
+            asyncio.run(gateway.chat([], tools=tools))
+            assert "parallel_tool_calls" not in captured
+        finally:
+            module.httpx.AsyncClient = original  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# read-only store
+# ---------------------------------------------------------------------------
+
+
+class TestReadOnlyStore:
+    """Read commands open the database read-only.
+
+    A read path that *can* write is a read path whose bug corrupts the store,
+    and every CLI listing opens the database.
+    """
+
+    def test_a_read_only_store_refuses_to_write(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        path = tmp_path / "uaa.db"
+        writable = Store(path)
+        writable.close()
+
+        readonly = Store.readonly(path)
+        try:
+            assert readonly.list_tasks() == []
+            with pytest.raises(sqlite3.OperationalError):
+                readonly.conn.execute("INSERT INTO sessions(id,name,working_dir,"
+                                      "model_alias,created_at,metadata) VALUES('x','x','x','x','x','{}')")
+        finally:
+            readonly.close()
+
+    def test_a_missing_database_is_created_instead_of_failing(self, tmp_path: Path) -> None:
+        """"Nothing recorded yet" must not be an error.
+
+        A read-only connection cannot create the file, so `readonly` falls
+        back to a normal open when it is absent.
+        """
+        path = tmp_path / "fresh" / "uaa.db"
+        store = Store.readonly(path)
+        try:
+            assert store.list_tasks() == []
+        finally:
+            store.close()
+        assert path.exists()
+
+
+# ---------------------------------------------------------------------------
+# tool inventory
+# ---------------------------------------------------------------------------
+
+
+class TestToolInventoryFilter:
+    def test_describe_can_filter_to_one_effect_class(self) -> None:
+        """Reviewing the permission surface means asking "what can this
+        runtime execute", not scanning the whole catalogue."""
+        from unified_agent.tools.registry import ToolRegistry
+        from unified_agent.tools.shell import RunCommandTool
+
+        registry = ToolRegistry()
+        registry.register(RunCommandTool())
+        for tool in FS_TOOLS:
+            registry.register(tool)
+
+        executable = registry.describe(effect=EffectClass.EXECUTE_LOCAL)
+        assert [item["name"] for item in executable] == ["run_command"]
+        assert all(item["effect"] == "execute_local" for item in executable)
+
+        # No filter is still the whole catalogue.
+        assert len(registry.describe()) > len(executable)
+
+
+# ---------------------------------------------------------------------------
+# memory: batch writes and stale vectors
+# ---------------------------------------------------------------------------
+
+
+class TestVectorMaintenance:
+    def test_reindex_writes_the_batch_and_reports_stale_vectors(self, settings) -> None:  # noqa: ANN001
+        """Vectors built under a previous embedding model are invisible to
+        search, so changing `memory.embedding_model` silently narrows
+        retrieval to whatever was indexed since."""
+        from unified_agent.memory import build_memory_service
+
+        store = Store(settings.db_path)
+        try:
+            for i in range(5):
+                store.add_memory(
+                    content=f"fact number {i} about deployments",
+                    session_id="s",
+                    scope="project",
+                    tags=[],
+                    importance=0.5,
+                    source="test",
+                )
+            service = build_memory_service(settings=settings, store=store, model=None)
+
+            result = asyncio.run(service.reindex())
+            assert result["embedded"] == 5
+            assert store.vectors.count() == 5
+            assert service.stats()["stale_vectors"] == 0
+
+            # Pretend the embedding model changed: same rows, different key.
+            store.conn.execute("UPDATE memory_vectors SET model='old:model:512'")
+            assert service.stats()["stale_vectors"] == 5
+        finally:
+            store.close()
+
+
+# ---------------------------------------------------------------------------
+# projection consistency
+# ---------------------------------------------------------------------------
+
+
+class TestProjectionHealth:
+    async def test_doctor_notices_a_projection_that_stopped_being_updated(
+        self, settings, scripted  # noqa: ANN001
+    ) -> None:
+        """`tasks.state` is written every step and read by nothing, while the
+        project claims the projection is a cache that is wrong by
+        construction if it disagrees. A claim nothing checks is not a claim.
+        """
+        from unified_agent.cli import _store_health
+
+        agent, _ = await scripted([{"content": "done"}])
+        session = agent.store.ensure_session(
+            name="t", working_dir=str(settings.workspace), model_alias="scripted"
+        )
+        result = await agent.runtime.run("say done", session_id=session)
+        task_id = result.task_id
+
+        assert dict(_store_health(settings))["projection"].startswith("[green]")
+
+        # Corrupt the projection the way a crash between the event append and
+        # the projection write would.
+        agent.store.conn.execute(
+            "UPDATE tasks SET status='running' WHERE id=?", (task_id,)
+        )
+        detail = dict(_store_health(settings))["projection"]
+        assert detail.startswith("[red]")
+        assert "disagree" in detail
