@@ -53,6 +53,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from typing import Any
 from enum import Enum
 from pathlib import Path
 
@@ -219,6 +220,85 @@ def _sb_string(path: str) -> str:
 
 def _expand(path: str) -> str:
     return str(Path(path).expanduser())
+
+
+#: Environment variables that mean "a parent process is sandboxing us".
+#: Their presence is the difference between "Seatbelt does not work on this
+#: machine" and "Seatbelt cannot be tested from here", and those two
+#: conclusions lead to opposite decisions.
+SANDBOX_MARKER_PREFIXES = ("CODEBUDDY_", "SANDBOX_CENTER_", "WORKBUDDY_")
+
+#: Markers that name the sandbox directly, rather than merely coming from the
+#: app that applies it. Listed first: there are dozens of `CODEBUDDY_*`
+#: variables, and an alphabetical cut would hide the two that actually matter.
+SPECIFIC_MARKER_PREFIXES = ("CODEBUDDY_SANDBOX_", "SANDBOX_CENTER_", "WORKBUDDY_FS_")
+
+
+def environment_fingerprint() -> dict[str, Any]:
+    """Where was this run? The probe result is meaningless without it.
+
+    A restrictive-profile probe fails for two very different reasons: the host
+    refuses it, or the process is already sandboxed and cannot install a
+    narrower one. Reporting "seatbelt: unavailable" without saying which is
+    how a reader concludes the feature is broken when the answer is "run this
+    somewhere else".
+    """
+    found = [k for k in os.environ if k.startswith(SANDBOX_MARKER_PREFIXES)]
+    markers = sorted(found, key=lambda k: (not k.startswith(SPECIFIC_MARKER_PREFIXES), k))
+    parents: list[str] = []
+    try:
+        pid = os.getpid()
+        for _ in range(6):
+            out = subprocess.run(
+                ["ps", "-o", "comm=,ppid=", "-p", str(pid)],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            line = (out.stdout or b"").decode("utf-8", errors="replace").strip()
+            if not line:
+                break
+            parts = line.rsplit(None, 1)
+            parents.append(parts[0])
+            if len(parts) < 2 or parts[1] == "1":
+                break
+            pid = int(parts[1])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        parents = []
+
+    return {
+        "inside_parent_sandbox": bool(markers),
+        "sandbox_marker_count": len(markers),
+        "sandbox_markers": markers[:12],
+        "term_program": os.environ.get("TERM_PROGRAM", ""),
+        "shell": os.environ.get("SHELL", ""),
+        "parent_chain": parents,
+        "parent_chain_readable": bool(parents),
+    }
+
+
+def builtin_profile_probe() -> ProbeResult:
+    """Can *any* restrictive profile be applied, including a system one?
+
+    `sandbox-exec -n no-network` uses a profile Apple ships. If that fails the
+    same way a generated one does, the problem is not the generated profile --
+    which rules out the most likely false conclusion.
+    """
+    if sys.platform != "darwin" or not Path(_SEATBELT_BIN).exists():
+        return ProbeResult(False, "not applicable")
+    try:
+        result = subprocess.run(
+            [_SEATBELT_BIN, "-n", "no-network", "/usr/bin/true"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ProbeResult(False, f"{type(exc).__name__}: {exc}")
+    if result.returncode == 0:
+        return ProbeResult(True, "the system's own no-network profile applied")
+    stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+    return ProbeResult(False, stderr or f"exit {result.returncode}")
 
 
 def seatbelt_probe() -> ProbeResult:
@@ -545,6 +625,10 @@ __all__ = [
     "NoSandbox",
     "SeatbeltSandbox",
     "DockerSandbox",
+    "SANDBOX_MARKER_PREFIXES",
+    "SPECIFIC_MARKER_PREFIXES",
     "build_sandbox",
+    "builtin_profile_probe",
+    "environment_fingerprint",
     "seatbelt_probe",
 ]

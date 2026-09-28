@@ -1,4 +1,6 @@
 from unified_agent.sandbox.base import (  # noqa: F401
+    SANDBOX_MARKER_PREFIXES,
+    SPECIFIC_MARKER_PREFIXES,
     DockerSandbox,
     NoSandbox,
     ProbeResult,
@@ -7,6 +9,8 @@ from unified_agent.sandbox.base import (  # noqa: F401
     SandboxSelection,
     SeatbeltSandbox,
     build_sandbox,
+    builtin_profile_probe,
+    environment_fingerprint,
     seatbelt_probe,
 )
 
@@ -18,6 +22,10 @@ __all__ = [
     "NoSandbox",
     "SeatbeltSandbox",
     "DockerSandbox",
+    "SANDBOX_MARKER_PREFIXES",
+    "SPECIFIC_MARKER_PREFIXES",
     "build_sandbox",
+    "builtin_profile_probe",
+    "environment_fingerprint",
     "seatbelt_probe",
 ]

@@ -1079,12 +1079,19 @@ def sandbox(
     """
     import json
 
-    from unified_agent.sandbox import build_sandbox, seatbelt_probe
+    from unified_agent.sandbox import (
+        build_sandbox,
+        builtin_profile_probe,
+        environment_fingerprint,
+        seatbelt_probe,
+    )
 
     settings = _settings(home, workspace)
     settings.ensure_dirs()
 
     probe = seatbelt_probe()
+    builtin = builtin_profile_probe()
+    environment = environment_fingerprint()
     selection = build_sandbox(
         backend,
         home=settings.home,
@@ -1105,6 +1112,11 @@ def sandbox(
         "platform": sys.platform,
         "python": sys.executable,
         "probe": {"ok": probe.ok, "detail": probe.detail},
+        # Both of these are needed to read the probe correctly: one says
+        # whether the run was clean, the other whether the generated profile
+        # was the problem or any restrictive profile is refused here.
+        "environment": environment,
+        "builtin_profile": {"ok": builtin.ok, "detail": builtin.detail},
         "requested": selection.requested,
         "selected": selection.sandbox.name,
         "isolation": selection.sandbox.isolation,
@@ -1112,7 +1124,7 @@ def sandbox(
         "notes": selection.notes,
         "caveats": selection.sandbox.caveats(),
         "live_check": live,
-        "verdict": _sandbox_verdict(selection, probe, live),
+        "verdict": _sandbox_verdict(selection, probe, live, environment, builtin),
     }
 
     target: Path | None = None
@@ -1128,9 +1140,29 @@ def sandbox(
         console.print_json(json.dumps(payload, ensure_ascii=False))
         return
 
+    console.print("[bold]environment[/bold]")
+    if environment.get("inside_parent_sandbox"):
+        console.print(
+            "  [yellow]this run is inside a parent sandbox[/yellow] "
+            f"({len(environment.get('sandbox_markers', []))} marker(s))"
+        )
+        console.print(
+            "  [dim]so a failing probe here does NOT mean Seatbelt is broken on "
+            "your machine[/dim]"
+        )
+    else:
+        console.print("  [green]clean[/green] (no sandbox markers in the environment)")
+    if environment.get("term_program"):
+        console.print(f"  terminal: {escape(environment['term_program'])}")
+    console.print()
     console.print("[bold]probe[/bold]")
     console.print(f"  seatbelt: {'[green]ok[/green]' if probe.ok else '[red]unavailable[/red]'}")
     console.print(f"    {escape(probe.detail)}")
+    console.print(
+        f"  system profile (-n no-network): "
+        f"{'[green]ok[/green]' if builtin.ok else '[red]refused[/red]'}"
+    )
+    console.print(f"    {escape(builtin.detail)}")
     console.print()
     console.print("[bold]selection[/bold]")
     for line in selection.summary().splitlines():
@@ -1155,7 +1187,7 @@ def sandbox(
     if target is not None:
         console.print(f"[dim]written to {escape(str(target))}[/dim]")
 
-    if not probe.ok and sys.platform == "darwin":
+    if not probe.ok and sys.platform == "darwin" and environment.get("inside_parent_sandbox"):
         # The one case where the user has to act, so give them the exact line
         # rather than a description of it. A command they have to assemble is
         # a command that does not get run.
@@ -1181,15 +1213,36 @@ def _sh(value: Any) -> str:
     return shlex.quote(str(value))
 
 
-def _sandbox_verdict(selection: Any, probe: Any, live: list[dict[str, Any]]) -> str:
-    """One sentence a reader can act on."""
+def _sandbox_verdict(
+    selection: Any,
+    probe: Any,
+    live: list[dict[str, Any]],
+    environment: dict[str, Any] | None = None,
+    builtin: Any = None,
+) -> str:
+    """One sentence a reader can act on.
+
+    The environment is part of the verdict, not a footnote. "Seatbelt does not
+    work on this machine" and "Seatbelt cannot be tested from here" lead to
+    opposite decisions, and a probe result alone cannot tell them apart.
+    """
+    environment = environment or {}
     if selection.sandbox.name == "none":
         if probe.ok:
             return "seatbelt works here but a different backend was requested"
-        return (
-            "NO ISOLATION ACTIVE. If you are reading this from inside a container or a "
-            "sandboxed parent process, run `uaa sandbox` again from a normal terminal."
-        )
+        if environment.get("inside_parent_sandbox"):
+            return (
+                "NO ISOLATION ACTIVE -- and this run was itself inside a sandbox "
+                f"({', '.join(environment.get('sandbox_markers', [])[:2])}...), so the probe "
+                "result says nothing about this machine. Re-run from Terminal.app."
+            )
+        if builtin is not None and not builtin.ok:
+            return (
+                "NO ISOLATION ACTIVE. This machine refuses to apply any restrictive "
+                "Seatbelt profile, including the system's own -- so Seatbelt is not a "
+                "usable backend here. The path fence and command guard still apply."
+            )
+        return "NO ISOLATION ACTIVE. Run `uaa sandbox` again from a normal terminal."
     if not live:
         return f"{selection.sandbox.name} is active; no live check was run"
     # `ok` on a write row means the isolation held. So a row with `ok` false

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-440%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-449%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -389,6 +389,19 @@ uaa sandbox --report    # 报告 + 把机器可读结果写到 <home>/sandbox-ve
 
 > **必须在普通终端里跑。** macOS **拒绝**从「已经被沙箱化的进程」安装更窄的 profile（`sandbox_apply: Operation not permitted`）—— 容器里、以及任何会给子进程套沙箱的环境里都探测不到。`uaa sandbox` 会检测到这种情况，并打印一条**可直接粘贴**的命令。
 
+报告里带**环境指纹**，因为「这台机器上 Seatbelt 不能用」和「这里测不了」导向相反的决定，而单看探测结果分不出来：
+
+```json
+{
+  "environment": { "inside_parent_sandbox": true, "sandbox_marker_count": 90, ... },
+  "probe": { "ok": false, "detail": "sandbox_apply: Operation not permitted" },
+  "builtin_profile": { "ok": false, "detail": "..." },
+  "verdict": "...this run was itself inside a sandbox, so the probe result says nothing about this machine"
+}
+```
+
+`builtin_profile` 是**第二个数据点**：`sandbox-exec -n no-network` 用的是 Apple 自带的 profile。它和生成的 profile 以同样方式失败，就说明问题不在生成的 profile 上——这排除了最容易得出的错误结论。
+
 威胁模型是抄 Codex / Gemini CLI 的，而且理由充分：
 
 > **anti-tampering, not anti-exfiltration** —— 读是全开的，锁的是写。
@@ -436,7 +449,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 440 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 449 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```

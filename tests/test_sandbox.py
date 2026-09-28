@@ -11,6 +11,7 @@ user running from a normal terminal.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -449,3 +450,118 @@ class TestVerificationReport:
             "verdict",
         }
         assert loaded["caveats"], "the limitations must travel with the result"
+
+
+class TestEnvironmentFingerprint:
+    """A probe result is unreadable without knowing where it ran.
+
+    "Seatbelt does not work on this machine" and "Seatbelt cannot be tested
+    from here" lead to opposite decisions, and the probe alone cannot tell
+    them apart -- both produce a failure.
+    """
+
+    def test_reports_the_expected_shape(self) -> None:
+        from unified_agent.sandbox import environment_fingerprint
+
+        fingerprint = environment_fingerprint()
+        assert set(fingerprint) >= {
+            "inside_parent_sandbox",
+            "sandbox_markers",
+            "term_program",
+            "parent_chain",
+            "parent_chain_readable",
+        }
+
+    def test_detects_a_sandboxing_parent(self, monkeypatch) -> None:  # noqa: ANN001
+        from unified_agent.sandbox import environment_fingerprint
+
+        monkeypatch.setenv("CODEBUDDY_SANDBOX_BROKER_TRACE_ID", "x")
+        fingerprint = environment_fingerprint()
+        assert fingerprint["inside_parent_sandbox"] is True
+        assert "CODEBUDDY_SANDBOX_BROKER_TRACE_ID" in fingerprint["sandbox_markers"]
+
+    def test_a_clean_environment_reports_clean(self, monkeypatch) -> None:  # noqa: ANN001
+        from unified_agent import sandbox as sandbox_pkg
+        from unified_agent.sandbox import environment_fingerprint
+
+        for key in list(os.environ):
+            if key.startswith(sandbox_pkg.SANDBOX_MARKER_PREFIXES):
+                monkeypatch.delenv(key, raising=False)
+        fingerprint = environment_fingerprint()
+        assert fingerprint["inside_parent_sandbox"] is False
+        assert fingerprint["sandbox_markers"] == []
+
+    def test_the_builtin_profile_probe_answers_without_raising(self) -> None:
+        from unified_agent.sandbox import builtin_profile_probe
+
+        result = builtin_profile_probe()
+        assert isinstance(result.ok, bool)
+        assert result.detail
+
+
+class TestVerdictDistinguishesEnvironments:
+    """The three cases must read differently, because they mean different
+    things: broken here, untestable here, or working."""
+
+    def _selection(self):  # noqa: ANN202
+        sandbox = NoSandbox()
+        sandbox.name = "none"
+        return SandboxSelection(sandbox, "auto", notes=[])
+
+    def test_nested_run_says_the_result_is_uninformative(self) -> None:
+        from unified_agent.cli import _sandbox_verdict
+
+        verdict = _sandbox_verdict(
+            self._selection(),
+            ProbeResult(False, "stubbed"),
+            [],
+            {"inside_parent_sandbox": True, "sandbox_markers": ["CODEBUDDY_X", "Y"]},
+            ProbeResult(False, "refused"),
+        )
+        assert "says nothing about this machine" in verdict
+        assert "Terminal.app" in verdict
+
+    def test_clean_run_with_a_refused_builtin_profile_says_seatbelt_is_unusable(
+        self,
+    ) -> None:
+        from unified_agent.cli import _sandbox_verdict
+
+        verdict = _sandbox_verdict(
+            self._selection(),
+            ProbeResult(False, "refused"),
+            [],
+            {"inside_parent_sandbox": False, "sandbox_markers": []},
+            ProbeResult(False, "sandbox-exec: sandbox_apply: Operation not permitted"),
+        )
+        assert "not a usable backend here" in verdict
+        assert "path fence" in verdict, "say what still protects the user"
+
+    def test_clean_run_without_a_builtin_answer_stays_neutral(self) -> None:
+        from unified_agent.cli import _sandbox_verdict
+
+        verdict = _sandbox_verdict(
+            self._selection(),
+            ProbeResult(False, "stubbed"),
+            [],
+            {"inside_parent_sandbox": False, "sandbox_markers": []},
+            None,
+        )
+        assert "normal terminal" in verdict
+
+    def test_a_working_probe_short_circuits(self) -> None:
+        from unified_agent.cli import _sandbox_verdict
+
+        verdict = _sandbox_verdict(
+            self._selection(),
+            ProbeResult(True, "ok"),
+            [],
+            {"inside_parent_sandbox": True, "sandbox_markers": ["X"]},
+            ProbeResult(True, "ok"),
+        )
+        assert "works here" in verdict
+
+    def test_the_verdict_still_defaults_environment_to_absent(self) -> None:
+        """Callers that predate the environment argument must not crash."""
+        from unified_agent.cli import _sandbox_verdict
+
+        assert _sandbox_verdict(self._selection(), ProbeResult(False, "x"), [])
