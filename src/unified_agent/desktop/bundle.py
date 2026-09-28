@@ -41,6 +41,11 @@ INK = (230, 237, 243, 255)  # #e6edf3
 
 ICONSET_SIZES = [16, 32, 64, 128, 256, 512, 1024]
 
+# `iconutil` rejects any staging directory not named `*.iconset`, with the
+# unhelpful message "Invalid Iconset". Named here so the rule is a constant
+# that can be asserted without needing iconutil installed.
+ICONSET_NAME = "uaa.iconset"
+
 INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -246,6 +251,15 @@ class IconResult:
         return self.path is not None
 
 
+def iconutil_path() -> str | None:
+    """Locate `iconutil`, or None. Split out so callers (and tests) can ask
+    the question without attempting a build."""
+    found = shutil.which("iconutil")
+    if found:
+        return found
+    return "/usr/bin/iconutil" if Path("/usr/bin/iconutil").exists() else None
+
+
 def build_icns(target_dir: Path) -> IconResult:
     """Assemble AppIcon.icns.
 
@@ -262,13 +276,11 @@ def build_icns(target_dir: Path) -> IconResult:
       The obvious `rmtree` is a recursive delete of a dozen files, and the
       name is fixed so the next build overwrites it rather than accumulating.
     """
-    iconutil = shutil.which("iconutil") or (
-        "/usr/bin/iconutil" if Path("/usr/bin/iconutil").exists() else None
-    )
+    iconutil = iconutil_path()
     if iconutil is None:
         return IconResult(None, "iconutil not found (install Xcode command line tools)")
 
-    iconset = Path(tempfile.gettempdir()) / "uaa.iconset"
+    iconset = Path(tempfile.gettempdir()) / ICONSET_NAME
     iconset.mkdir(parents=True, exist_ok=True)
     for size in ICONSET_SIZES:
         write_png(iconset / f"icon_{size}x{size}.png", size, size, render_icon(size))
@@ -422,9 +434,12 @@ __all__ = [
     "BUNDLE_ID",
     "BundleError",
     "BundleResult",
+    "ICONSET_NAME",
+    "ICONSET_SIZES",
     "IconResult",
     "build_app_bundle",
     "build_icns",
+    "iconutil_path",
     "render_icon",
     "write_png",
 ]

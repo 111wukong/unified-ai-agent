@@ -134,11 +134,19 @@ class TestServerLifecycle:
 
 class TestAvailabilityReporting:
     def test_reports_either_ready_or_a_reason(self) -> None:
+        """Asserted on the contract, not on this host's imports.
+
+        The reason is the underlying ImportError, which differs between "the
+        package is absent" and "a transitive dependency is absent". Pinning
+        the text to either one makes the test fail on a host that is merely
+        configured differently -- which is what happened in CI.
+        """
         ok, detail = desktop_available()
         assert isinstance(ok, bool)
         assert detail, "availability must always explain itself"
         if not ok:
-            assert "pywebview" in detail, "the reason must name the missing piece"
+            assert "desktop window" in detail
+            assert "[desktop]" in detail, "the reason must say how to fix it"
 
 
 class TestPngWriter:
@@ -229,6 +237,9 @@ class TestAppBundle:
         assert result.path.name == "UnifiedAgent.app"
         assert result.mode == "launcher"
         assert result.notes, "the limitations must be stated, not implied"
+        assert any("launcher bundle" in note for note in result.notes), (
+            "the relocatability limitation must be stated, not implied"
+        )
 
         contents = result.path / "Contents"
         executable = contents / "MacOS" / "UnifiedAgent"
@@ -277,12 +288,27 @@ class TestAppBundle:
             assert result.reason, "a missing icon must say why"
 
     def test_the_iconset_directory_is_named_with_the_extension(self, tmp_path: Path) -> None:
-        """`iconutil` rejects any staging directory not named `*.iconset`."""
-        bundle_mod.build_icns(tmp_path)
+        """`iconutil` rejects any staging directory not named `*.iconset`.
+
+        The naming rule is asserted as a constant so it holds on hosts
+        without iconutil, where nothing gets staged at all; the staging
+        itself is asserted only where it can happen.
+        """
+        assert bundle_mod.ICONSET_NAME.endswith(".iconset"), (
+            "iconutil rejects any other name with 'Invalid Iconset'"
+        )
+
+        result = bundle_mod.build_icns(tmp_path)
+        if bundle_mod.iconutil_path() is None:
+            # No iconutil here, so nothing was staged. The naming rule above
+            # still held; there is nothing else to check.
+            assert not result and result.reason
+            return
+
         import tempfile
 
-        staging = Path(tempfile.gettempdir()) / "uaa.iconset"
-        assert staging.is_dir(), "iconutil needs a directory ending in .iconset"
+        staging = Path(tempfile.gettempdir()) / bundle_mod.ICONSET_NAME
+        assert staging.is_dir(), "the staging directory must exist where it was used"
         assert any(staging.glob("icon_*.png"))
 
     def test_bundle_identifier_is_reverse_dns(self) -> None:
