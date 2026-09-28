@@ -1012,6 +1012,11 @@ def serve(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8000, "--port"),
     reload: bool = typer.Option(False, "--reload"),
+    token: bool = typer.Option(
+        False,
+        "--token",
+        help="Require a per-run session token on API calls (recommended).",
+    ),
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
@@ -1029,12 +1034,17 @@ def serve(
         )
         raise typer.Exit(2) from exc
 
+    import secrets as _secrets
+
     from unified_agent.api.app import create_app
     from unified_agent.sandbox import build_sandbox
 
     settings = _settings(home, workspace)
     settings.ensure_dirs()
-    application = create_app(settings)
+    session_token = _secrets.token_urlsafe(24) if token else None
+    application = create_app(
+        settings, token=session_token, allowed_hosts=[host, "127.0.0.1", "localhost", "::1"]
+    )
 
     selection = build_sandbox(
         settings.sandbox.backend,
@@ -1048,7 +1058,17 @@ def serve(
     if warning := selection.warning():
         console.print(f"[yellow]warning[/yellow]: {escape(warning)}")
 
-    console.print(f"console: [cyan]http://{host}:{port}/[/cyan]")
+    if session_token:
+        console.print(
+            f"console: [cyan]http://{host}:{port}/#{session_token}[/cyan]"
+            "  [dim](the token is in the fragment; it never reaches the server)[/dim]"
+        )
+        console.print(
+            "[dim]api calls need the header[/dim] "
+            f"[cyan]X-UAA-Token: {session_token}[/cyan]"
+        )
+    else:
+        console.print(f"console: [cyan]http://{host}:{port}/[/cyan]")
     console.print(f"api docs: [cyan]http://{host}:{port}/docs[/cyan]")
     console.print(f"ag-ui:   [cyan]POST http://{host}:{port}/agui[/cyan]  (SSE)")
     if host not in {"127.0.0.1", "localhost", "::1"}:
@@ -1057,6 +1077,93 @@ def serve(
             "This service can execute commands on this machine."
         )
     uvicorn.run(application, host=host, port=port, reload=reload, log_level="info")
+
+
+@app.command()
+def desktop(
+    port: int = typer.Option(0, "--port", help="0 picks a free port."),
+    width: int = typer.Option(1180, "--width"),
+    height: int = typer.Option(820, "--height"),
+    bundle: bool = typer.Option(
+        False, "--bundle", help="Build a macOS .app bundle instead of opening a window."
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", help="Where to put the .app (default ~/Applications)."
+    ),
+    debug: bool = typer.Option(False, "--debug", help="Open webview devtools."),
+    no_token: bool = typer.Option(
+        False, "--no-token", help="Disable the session token (weaker; loopback only)."
+    ),
+    check: bool = typer.Option(
+        False, "--check", help="Start and stop the server without opening a window."
+    ),
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """Open the desktop window, or build a double-clickable app bundle.
+
+    The window is the operating system's own webview around the same server
+    and the same console the browser uses, so there is no second UI to keep
+    in sync. `--bundle` produces a macOS `.app`; `--check` exercises the
+    server lifecycle without a display, which is what CI can verify.
+    """
+    import secrets as _secrets
+
+    from unified_agent.desktop import (
+        BundleError,
+        DesktopUnavailable,
+        build_app_bundle,
+        desktop_available,
+        run_desktop,
+    )
+
+    settings = _settings(home, workspace)
+    settings.ensure_dirs()
+
+    if bundle:
+        target = output or (Path.home() / "Applications")
+        target.mkdir(parents=True, exist_ok=True)
+        try:
+            result = build_app_bundle(target_dir=target, version=__version__)
+        except BundleError as exc:
+            err_console.print(escape(str(exc)))
+            raise typer.Exit(2) from exc
+        console.print(f"[green]built[/green] {escape(str(result.path))}")
+        console.print(escape(result.summary()), markup=False)
+        console.print(f"\nOpen it with: [cyan]open {escape(str(result.path))}[/cyan]")
+        return
+
+    if check:
+        # The headless check exists for environments with no display, so it
+        # must not gate on the webview being importable -- otherwise CI, which
+        # is exactly that environment, can never run it.
+        console.print("webview: [dim]skipped (--check verifies the server only)[/dim]")
+    else:
+        ok, detail = desktop_available()
+        console.print(f"webview: [cyan]{escape(detail)}[/cyan]")
+        if not ok:
+            err_console.print(
+                "\nInstall the desktop extra, or use [cyan]uaa serve[/cyan] and open "
+                "the console in a browser:\n  pip install -e \".[desktop]\""
+            )
+            raise typer.Exit(2)
+
+    token = None if no_token else _secrets.token_urlsafe(24)
+    try:
+        code = run_desktop(
+            settings=settings,
+            port=port,
+            token=token,
+            size=(width, height),
+            debug=debug,
+            headless_check=check,
+        )
+    except DesktopUnavailable as exc:
+        err_console.print(escape(str(exc)))
+        raise typer.Exit(3) from exc
+    if check:
+        console.print("[green]ok[/green] server lifecycle works headlessly")
+    raise typer.Exit(code)
 
 
 # ---------------------------------------------------------------------------

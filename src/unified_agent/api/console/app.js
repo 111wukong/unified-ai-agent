@@ -19,6 +19,18 @@ const state = {
   current: null,
 };
 
+/* The desktop launcher hands us a per-launch session token in the URL
+ * fragment. A fragment is never sent to the server and never appears in a
+ * Referer, so it cannot leak through the page itself -- which is the whole
+ * reason it is not a query parameter. */
+const TOKEN = (() => {
+  const raw = location.hash.replace(/^#/, "");
+  if (!raw) return "";
+  // Keep it out of the address bar once we have it.
+  history.replaceState(null, "", location.pathname + location.search);
+  return raw;
+})();
+
 /* ---------------------------------------------------------------- helpers */
 
 function el(tag, className, text) {
@@ -44,8 +56,16 @@ function setStatus(text, busy = false) {
   node.classList.toggle("busy", busy);
 }
 
+function authHeaders(extra) {
+  const headers = { ...(extra || {}) };
+  if (TOKEN) headers["X-UAA-Token"] = TOKEN;
+  return headers;
+}
+
 async function json(url, options) {
-  const response = await fetch(url, options);
+  const request = { ...(options || {}) };
+  request.headers = authHeaders(request.headers);
+  const response = await fetch(url, request);
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(`${response.status}: ${detail.slice(0, 300)}`);
@@ -248,7 +268,7 @@ async function decide(verb) {
 async function streamRun(body) {
   const response = await fetch("/agui", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!response.ok) {
@@ -258,7 +278,9 @@ async function streamRun(body) {
 }
 
 async function attach(taskId) {
-  const response = await fetch(`/api/v1/tasks/${taskId}/stream`);
+  const response = await fetch(`/api/v1/tasks/${taskId}/stream`, {
+    headers: authHeaders(),
+  });
   if (!response.ok) throw new Error(`${response.status} attaching to ${taskId}`);
   await consume(response);
 }
@@ -323,7 +345,10 @@ async function send(goal) {
 
 async function cancel() {
   if (!state.taskId) return;
-  await fetch(`/api/v1/tasks/${state.taskId}/cancel`, { method: "POST" });
+  await fetch(`/api/v1/tasks/${state.taskId}/cancel`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
   setStatus("cancelling…", true);
 }
 
@@ -365,6 +390,18 @@ async function boot() {
     const health = await json("/api/v1/health");
     $("version").textContent = health.version;
     if (health.default_model) $("model").value = health.default_model;
+    if (health.token_required && !TOKEN) {
+      // Say it here rather than letting every action fail with a 403.
+      addTurn("error", "error").append(
+        el(
+          "div",
+          "body",
+          "This server requires a session token and this page does not have one.\n" +
+            "Launch it with `uaa desktop` (the token is passed to the window), or " +
+            "open the URL printed by `uaa serve --token`."
+        )
+      );
+    }
   } catch { /* the console still works without /health */ }
 
   try {

@@ -20,7 +20,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.24"]
 api = ["fastapi>=0.115", "uvicorn>=0.32"]
+# The desktop window is the OS webview around the same server and console, so
+# it needs exactly one dependency. `all` is the "just make it work" extra.
+desktop = ["pywebview>=5.0"]
 mcp = ["mcp>=1.0"]
+all = ["fastapi>=0.115", "uvicorn>=0.32", "pywebview>=5.0"]
 
 [project.scripts]
 uaa = "unified_agent.cli:main"

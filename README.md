@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-273%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![tests](https://img.shields.io/badge/tests-308%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
@@ -12,6 +12,8 @@ uaa init
 uaa run --model mock "查看当前目录下的 Python 文件并总结"   # 离线，不需要任何 API key
 uaa run "分析认证模块并补充测试"                            # 用真实模型
 uaa serve                                                   # HTTP + WebSocket + Web 控制台
+uaa desktop                                                 # 原生桌面窗口
+uaa desktop --bundle                                        # 打成可双击的 .app
 uaa sandbox                                                 # 报告进程隔离实际是否生效
 ```
 
@@ -187,6 +189,10 @@ src/unified_agent/
 │   ├── mcp.py          MCP stdio 客户端（双协议时代）
 │   ├── memory_tools.py save_memory / search_memory / load_skill / update_plan / finish
 │   └── registry.py
+├── desktop/
+│   ├── launcher.py     服务线程 + 系统 webview 窗口 + 健康门
+│   ├── bundle.py       .app 打包 + 纯标准库生成图标
+│   └── __main__.py     bundle 里的可执行入口
 ├── api/
 │   ├── app.py          FastAPI：REST + AG-UI(SSE) + WebSocket + 控制台挂载
 │   ├── agui.py         AG-UI 编码器（内部事件 → 协议事件）
@@ -266,6 +272,32 @@ curl -N -X POST http://127.0.0.1:8000/agui \
 
 ---
 
+## 桌面端：系统 webview，不是 Electron
+
+```bash
+pip install -e ".[desktop]"     # 只多一个依赖：pywebview
+uaa desktop                      # 原生窗口
+uaa desktop --bundle             # ~/Applications/UnifiedAgent.app，可双击
+```
+
+窗口是**操作系统自己的 webview**（macOS 上 WKWebView）套在**同一个服务、同一个控制台**外面。没有第二套 UI，没有第二套构建系统，没有捆绑 Chromium。
+
+为什么不是 Electron / Tauri：
+
+| | 代价 |
+|---|---|
+| Electron | 每个应用 ~150MB，并且往一个刻意不带 npm 的仓库里塞进 npm |
+| Tauri | 二进制更小，但要在 Python 项目里维护 Rust + Node 工具链，只为开一个窗口 |
+| **pywebview** | 一个依赖，三行代码开窗口，复用现有全部前端 |
+
+诚实的代价：默认打出来的是**启动器 bundle**（用构建时的解释器跑已安装的包），不是自包含二进制 —— 移动或删除那个虚拟环境会让应用失效。`--bundle` 的输出里会明说这一点。要自包含就得上 PyInstaller（`--frozen` 会告诉你缺什么，而不是半途失败）。
+
+**应用图标是纯标准库画出来的**：手写 PNG 编码器 + macOS 自带的 `iconutil`。为一个图标引一个绘图库，对一个以「零依赖」为卖点的项目不值。
+
+`.app` 里有什么：`Info.plist`（含 bundle id、版本、图标引用）、可执行启动脚本、`AppIcon.icns`。启动脚本在解释器不见了时会**说清楚并回退**到 PATH 上的 `python3` —— 双击之后毫无反应是最糟的结果。
+
+---
+
 ## 进程隔离：macOS 用 Seatbelt，Docker 作为可选后端
 
 ```bash
@@ -321,7 +353,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 ## 开发
 
 ```bash
-.venv/bin/python -m pytest -q                       # 273 条，全部离线，不需要 API key
+.venv/bin/python -m pytest -q                       # 308 条，全部离线，不需要 API key
 .venv/bin/python -m pytest tests/test_resume_semantics.py -v
 .venv/bin/ruff check src tests
 ```
@@ -350,6 +382,10 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 | `@dataclass` 默认 `eq=True` 使订阅者不可哈希 | 加进 `set` 直接崩；测试全绿是因为没人订阅 |
 | WebSocket 只转发实时事件、不回放历史 | 晚连的客户端永远挂住 |
 | 沙箱不可用时 `wrap` 静默直通 | 用户配了 Seatbelt 却在裸跑，没人告诉他 |
+| **健康探测不带令牌** | 令牌默认开启，于是 `uaa desktop` 每次都会报「服务起不来」，而服务其实好好的 |
+| **`iconutil` 要求目录名以 `.iconset` 结尾** | 起错名一律报 "Invalid Iconset"，而失败原因被吞成「iconutil 不可用」 |
+| 打包用 `rmtree` 清理中间产物 | 递归删除撞上删除护栏，打包直接崩；改成暂存目录 + rename 换入 |
+| `--check` 却先要求 GUI 可用 | 它存在的意义就是在没有 GUI 的地方验证，结果在 CI 上必然失败 |
 
 ## License
 

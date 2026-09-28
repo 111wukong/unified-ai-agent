@@ -52,7 +52,12 @@ def api(settings, workspace):  # noqa: ANN001
             build_agent(settings=settings, models=ScriptedModels(model))
         )
         created.append(service.agent)
-        return TestClient(create_app(settings, service=service))
+        # The guard only accepts loopback Host headers, and the test client
+        # sends `testserver`. Declaring it here keeps the allowlist in
+        # production loopback-only rather than widening it for tests.
+        return TestClient(
+            create_app(settings, service=service, allowed_hosts=["testserver", "127.0.0.1"])
+        )
 
     yield _make
     for agent in created:
@@ -463,3 +468,126 @@ class TestWireFormatInvariants:
         assert isinstance(many, list) and len(many) >= 3
 
 
+
+
+class TestGuard:
+    """Host allowlist and session token.
+
+    Two independent checks that stop different attackers, which is why both
+    exist:
+
+    * **Host** defeats DNS rebinding. A browser will POST to 127.0.0.1 on
+      behalf of any page it loads, but it cannot forge the Host header.
+    * **Token** defeats another local process, which can find the port but
+      not the per-launch token.
+    """
+
+    @pytest.fixture
+    def guarded(self, settings):  # noqa: ANN001
+        """A client whose app requires a token and only trusts loopback."""
+        import asyncio as _asyncio
+
+        from tests.conftest import ScriptedModel, ScriptedModels
+        from unified_agent.agent.factory import build_agent
+
+        created: list = []
+
+        def _make(token=None, hosts=None):  # noqa: ANN001
+            model = ScriptedModel(settings.models["scripted"], [{"content": "hi"}])
+            service = Service(settings)
+            service.agent = _asyncio.run(
+                build_agent(settings=settings, models=ScriptedModels(model))
+            )
+            created.append(service.agent)
+            app = create_app(
+                settings,
+                service=service,
+                token=token,
+                allowed_hosts=hosts if hosts is not None else ["testserver", "127.0.0.1"],
+            )
+            return TestClient(app)
+
+        yield _make
+        for agent in created:
+            agent.close()
+
+    def test_host_not_in_the_allowlist_is_refused(self, guarded) -> None:
+        """This is the DNS-rebinding case: Host says something else entirely."""
+        client = guarded()
+        with client:
+            response = client.get("/api/v1/health", headers={"Host": "evil.example"})
+        assert response.status_code == 403
+        assert "not allowed" in response.json()["detail"]
+
+    def test_allowed_host_passes(self, guarded) -> None:
+        client = guarded(hosts=["testserver"])
+        with client:
+            assert client.get("/api/v1/health").status_code == 200
+
+    def test_the_console_and_its_assets_are_not_guarded(self, guarded) -> None:
+        """The console must load before it can present a token."""
+        client = guarded(token="s3cret", hosts=["testserver"])
+        with client:
+            assert client.get("/", headers={"Host": "testserver"}).status_code == 200
+            assert (
+                client.get("/console/app.js", headers={"Host": "testserver"}).status_code == 200
+            )
+            # ...while the API behind it is still refused.
+            assert (
+                client.get("/api/v1/health", headers={"Host": "testserver"}).status_code == 403
+            )
+
+    def test_missing_token_is_refused(self, guarded) -> None:
+        client = guarded(token="s3cret")
+        with client:
+            response = client.get("/api/v1/health")
+        assert response.status_code == 403
+        assert "session token" in response.json()["detail"]
+
+    def test_wrong_token_is_refused(self, guarded) -> None:
+        client = guarded(token="s3cret")
+        with client:
+            response = client.get("/api/v1/health", headers={"X-UAA-Token": "nope"})
+        assert response.status_code == 403
+
+    def test_header_token_is_accepted(self, guarded) -> None:
+        client = guarded(token="s3cret")
+        with client:
+            response = client.get("/api/v1/health", headers={"X-UAA-Token": "s3cret"})
+        assert response.status_code == 200
+        assert response.json()["token_required"] is True
+
+    def test_query_token_is_accepted(self, guarded) -> None:
+        """For curl and for opening a stream in a plain browser tab."""
+        client = guarded(token="s3cret")
+        with client:
+            assert client.get("/api/v1/health?token=s3cret").status_code == 200
+
+    def test_bearer_token_is_accepted(self, guarded) -> None:
+        client = guarded(token="s3cret")
+        with client:
+            response = client.get(
+                "/api/v1/health", headers={"Authorization": "Bearer s3cret"}
+            )
+        assert response.status_code == 200
+
+    def test_the_agui_endpoint_is_guarded_too(self, guarded) -> None:
+        """Otherwise the token is trivially bypassed by running a task."""
+        client = guarded(token="s3cret")
+        with client:
+            response = client.post(
+                "/agui",
+                json={"messages": [{"role": "user", "content": "hi"}], "model": "scripted"},
+            )
+        assert response.status_code == 403
+
+    def test_no_token_configured_means_no_token_needed(self, guarded) -> None:
+        """`uaa serve` without --token stays usable; the Host check still runs."""
+        client = guarded(token=None)
+        with client:
+            assert client.get("/api/v1/health").status_code == 200
+            assert client.get("/api/v1/health", headers={"Host": "evil.example"}).status_code == 403
+
+    def test_health_reports_whether_a_token_is_required(self, guarded) -> None:
+        with guarded(token=None) as client:
+            assert client.get("/api/v1/health").json()["token_required"] is False

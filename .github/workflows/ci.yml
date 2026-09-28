@@ -64,6 +64,7 @@ jobs:
           uaa demo
           uaa tools | head -20
           uaa sandbox
+          uaa desktop --check
           uaa skill validate skills/code-review
 
       - name: Service smoke

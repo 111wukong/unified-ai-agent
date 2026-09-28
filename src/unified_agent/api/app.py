@@ -21,13 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from pathlib import Path
-from typing import Any, AsyncIterator, Literal
-
 import contextlib as _contextlib
+import secrets
+from pathlib import Path
+from typing import Any, AsyncIterator, Iterable, Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -46,6 +46,18 @@ CONSOLE_DIR = Path(__file__).parent / "console"
 # is already finished. Short enough that a late client is not held open,
 # long enough not to spam notices during a slow model call.
 IDLE_TIMEOUT_S = 30.0
+
+# Loopback only. A localhost service that can execute commands must reject a
+# request whose Host header points elsewhere: that is DNS rebinding -- a page
+# you visit resolves its own domain to 127.0.0.1 and drives your local agent
+# through your browser.
+DEFAULT_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
+# Paths that need the guard. The console and its assets do not: a browser
+# cannot read them cross-origin, and the console must load before it has a
+# token to present.
+PROTECTED_PREFIXES = ("/api/",)
+PROTECTED_EXACT = {"/agui"}
 
 # Effects a UI can pre-approve via the request body. SYSTEM_ADMIN is
 # deliberately excluded: it must never be grantable by a web request.
@@ -144,7 +156,21 @@ async def _lifespan(app: FastAPI):
         await svc.shutdown()
 
 
-def create_app(settings: Settings | None = None, *, service: Service | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    service: Service | None = None,
+    token: str | None = None,
+    allowed_hosts: Iterable[str] | None = None,
+) -> FastAPI:
+    """Build the app.
+
+    `token` turns on the session-token requirement (the desktop launcher
+    generates one per launch). `allowed_hosts` overrides the loopback
+    allowlist; tests pass their own because the test client's Host header is
+    not a loopback name.
+    """
+    hosts = frozenset(allowed_hosts) if allowed_hosts is not None else DEFAULT_ALLOWED_HOSTS
     app = FastAPI(
         lifespan=_lifespan,
         title="unified-ai-agent",
@@ -156,6 +182,16 @@ def create_app(settings: Settings | None = None, *, service: Service | None = No
     )
     svc = service or Service(settings or load_settings(create_if_missing=True))
     app.state.svc = svc
+    app.state.token = token
+    app.state.allowed_hosts = hosts
+
+    @app.middleware("http")
+    async def _guard(request: Request, call_next):  # noqa: ANN001, ANN202
+        if _needs_guard(request.url.path):
+            problem = _guard_problem(request, hosts=hosts, token=token)
+            if problem:
+                return JSONResponse({"detail": problem}, status_code=403)
+        return await call_next(request)
 
     # -- meta -------------------------------------------------------------
     @app.get("/api/v1/health")
@@ -172,6 +208,9 @@ def create_app(settings: Settings | None = None, *, service: Service | None = No
             "default_model": svc.settings.default_model,
             "running_tasks": len(svc.running),
             "sink_problems": sink_problems,
+            # Reported so a client can tell whether it must authenticate
+            # before attempting a mutating call.
+            "token_required": bool(token),
         }
 
     @app.get("/api/v1/sandbox")
@@ -323,6 +362,12 @@ def create_app(settings: Settings | None = None, *, service: Service | None = No
         transports; SSE is just the simpler default. History is replayed on
         connect, so attaching after the fact still shows the whole run.
         """
+        # HTTP middleware does not run for a WebSocket upgrade, so the same
+        # guard has to be applied here or this becomes the way around it.
+        problem = _guard_problem(websocket, hosts=hosts, token=token)
+        if problem:
+            await websocket.close(code=1008, reason=problem)
+            return
         await websocket.accept()
         if svc.a.store.get_task(task_id) is None:
             await websocket.close(code=1008, reason=f"unknown task {task_id}")
@@ -357,6 +402,46 @@ def create_app(settings: Settings | None = None, *, service: Service | None = No
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _needs_guard(path: str) -> bool:
+    return path in PROTECTED_EXACT or path.startswith(PROTECTED_PREFIXES)
+
+
+def _guard_problem(request: Any, *, hosts: frozenset[str], token: str | None) -> str | None:
+    """Return a refusal reason, or None to allow.
+
+    Two independent checks, because they stop different attackers:
+
+    * **Host** defeats DNS rebinding. A browser will happily POST to
+      127.0.0.1 on behalf of any page it loads, but it cannot forge the Host
+      header -- so requiring a loopback Host rejects the rebinding case.
+    * **Token** defeats another *local* process, which can discover the port
+      but not the per-launch token. The desktop launcher passes it to the
+      window in the URL fragment, which is never sent to the server and never
+      appears in a Referer.
+    """
+    raw_host = request.headers.get("host") or ""
+    hostname = raw_host.rsplit(":", 1)[0] if raw_host.count(":") == 1 else raw_host
+    if hostname and hostname not in hosts:
+        return (
+            f"host {hostname!r} is not allowed; this service only answers "
+            f"loopback requests ({', '.join(sorted(hosts))})"
+        )
+
+    if not token:
+        return None
+
+    supplied = (
+        request.headers.get("x-uaa-token") or request.query_params.get("token") or ""
+    )
+    if not supplied:
+        authorization = request.headers.get("authorization") or ""
+        if authorization.lower().startswith("bearer "):
+            supplied = authorization[7:]
+    if not secrets.compare_digest(supplied, token):
+        return "missing or invalid session token"
+    return None
 
 
 def _grantable(names: list[str]) -> list[EffectClass]:
