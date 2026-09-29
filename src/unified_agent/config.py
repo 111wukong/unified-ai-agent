@@ -59,6 +59,13 @@ class ModelSpec(BaseModel):
     model: str = "gpt-4.1"
     base_url: str | None = None
     api_key_env: str | None = None
+    #: Additional keys for the same alias, tried in order.
+    #:
+    #: A single key is a single point of failure, and providers answer 402/401
+    #: for reasons no retry fixes. With a pool the runtime can set a dead key
+    #: aside and try the next instead of failing every call for the rest of the
+    #: task. `api_key_env` is the first entry when both are set.
+    api_key_envs: list[str] = Field(default_factory=list)
     temperature: float = 0.2
     max_output_tokens: int = 4096
     timeout_s: float = 180.0
@@ -70,9 +77,22 @@ class ModelSpec(BaseModel):
     capabilities: dict[str, Any] = Field(default_factory=dict)
 
     def key_env(self) -> str:
-        if self.api_key_env:
-            return self.api_key_env
-        return DEFAULT_KEY_ENV.get(self.provider, "")
+        """The first credential's env name, for callers that want just one."""
+        envs = self.key_envs()
+        return envs[0] if envs else ""
+
+    def key_envs(self) -> list[str]:
+        """Every env name this alias may read, in the order they are tried."""
+        names = [self.api_key_env] if self.api_key_env else []
+        names.extend(self.api_key_envs)
+        if not names:
+            default = DEFAULT_KEY_ENV.get(self.provider, "")
+            if default:
+                names.append(default)
+        # De-duplicated but order-preserving: the same name listed twice would
+        # make the pool report a phantom second credential.
+        seen: set[str] = set()
+        return [n for n in names if n and not (n in seen or seen.add(n))]
 
     def api_key(self) -> str | None:
         env = self.key_env()

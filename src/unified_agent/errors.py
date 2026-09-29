@@ -20,9 +20,15 @@ class ConfigError(UAAError):
 class ModelError(UAAError):
     """Provider call failed (network, auth, rate limit, malformed response)."""
 
-    def __init__(self, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self, message: str, *, retryable: bool = False, failure_reason: str = ""
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
+        #: Classified cause, when the provider's answer was specific enough to
+        #: name one. `billing` and `quota` are the ones worth surfacing: they
+        #: look like a bug in the caller and are not.
+        self.failure_reason = failure_reason
 
 
 class ToolError(UAAError):

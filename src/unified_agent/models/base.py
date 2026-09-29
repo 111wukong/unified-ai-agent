@@ -71,6 +71,11 @@ class ChatModel(ABC):
         self.spec = spec
         self.model_name = spec.model
         self.capabilities = self.declared_capabilities().merged(spec.capabilities)
+        #: Built lazily by adapters that use more than one key for an alias.
+        self._pool: Any = None
+        #: The credential the in-flight request is using, so a refusal can be
+        #: attributed to the key that caused it rather than to the alias.
+        self._in_use: Any = None
 
     @abstractmethod
     def declared_capabilities(self) -> ModelCapabilities:

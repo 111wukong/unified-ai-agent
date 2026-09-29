@@ -15,6 +15,13 @@ from typing import Any
 import httpx
 
 from unified_agent.errors import ModelError
+from unified_agent.models.credentials import (
+    PERMANENT,
+    Credential,
+    CredentialPool,
+    classify_failure,
+    explain,
+)
 from unified_agent.models.base import ChatModel, ModelCapabilities, StreamCallback
 from unified_agent.types import Message, ModelResponse, TokenUsage, ToolCall
 
@@ -44,12 +51,39 @@ class OpenAICompatModel(ChatModel):
         base = (self.spec.base_url or "https://api.openai.com/v1").rstrip("/")
         return f"{base}/chat/completions"
 
-    def _headers(self) -> dict[str, str]:
+    @property
+    def pool(self) -> CredentialPool:
+        """The keys this alias may use, in order.
+
+        Built once and kept, because a key that has been refused for good stays
+        refused for the life of the process -- retrying it on every call is how
+        a task spends its whole budget proving the account is still empty.
+        """
+        if self._pool is None:
+            self._pool = CredentialPool(envs=self.spec.key_envs())
+        return self._pool
+
+    def _headers(self, credential: Credential | None = None) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        key = self.spec.api_key()
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
+        if credential is None:
+            usable = self.pool.usable()
+            credential = usable[0] if usable else None
+        if credential is not None and credential.value:
+            headers["Authorization"] = f"Bearer {credential.value}"
         return headers
+
+    def _refusal(self, resp: Any) -> tuple[str, bool]:
+        """Classify a failed response, and mark the credential if it is dead."""
+        reason = classify_failure(resp.status_code, _error_text(resp))
+        credential = self._in_use
+        if credential is not None:
+            self.pool.mark_failed(credential, reason)
+        detail = explain(reason, provider=self.provider, model=self.spec.model)
+        message = f"HTTP {resp.status_code}: {_error_text(resp)}"
+        if detail:
+            message = f"{message}\n{detail}"
+        # A billing or auth failure is not worth retrying; a 429 is.
+        return message, reason not in PERMANENT
 
     async def _chat(
         self,
@@ -83,21 +117,42 @@ class OpenAICompatModel(ChatModel):
             payload["stream_options"] = {"include_usage": True}
 
         timeout = httpx.Timeout(self.spec.timeout_s, connect=15.0)
+        attempts = self.pool.usable() or [None]
+        last: ModelError | None = None
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                if stream:
-                    return await self._stream(client, payload, stream)
-                resp = await client.post(self.endpoint, headers=self._headers(), json=payload)
-        except httpx.TimeoutException as exc:
-            raise ModelError(f"provider timed out: {exc}", retryable=True) from exc
-        except httpx.HTTPError as exc:
-            raise ModelError(f"transport error: {exc}", retryable=True) from exc
+                for index, credential in enumerate(attempts):
+                    self._in_use = credential
+                    try:
+                        if stream:
+                            return await self._stream(client, payload, stream, credential)
+                        resp = await client.post(
+                            self.endpoint, headers=self._headers(credential), json=payload
+                        )
+                    except httpx.TimeoutException as exc:
+                        raise ModelError(
+                            f"provider timed out: {exc}", retryable=True
+                        ) from exc
+                    except httpx.HTTPError as exc:
+                        raise ModelError(f"transport error: {exc}", retryable=True) from exc
 
-        if resp.status_code >= 400:
-            raise ModelError(
-                f"HTTP {resp.status_code}: {_error_text(resp)}",
-                retryable=resp.status_code in _RETRYABLE_STATUS,
-            )
+                    if resp.status_code < 400:
+                        break
+                    message, retryable = self._refusal(resp)
+                    last = ModelError(
+                        message,
+                        retryable=retryable,
+                        failure_reason=classify_failure(resp.status_code, _error_text(resp)),
+                    )
+                    # A key that is out of credit will be out of credit on the
+                    # next call too. Move to the next one rather than failing
+                    # the whole task on the first key's problem.
+                    if retryable or index == len(attempts) - 1:
+                        raise last
+        finally:
+            self._in_use = None
+        if last is not None:
+            raise last
         try:
             data = resp.json()
         except ValueError as exc:
@@ -106,7 +161,11 @@ class OpenAICompatModel(ChatModel):
 
     # -- streaming --------------------------------------------------------
     async def _stream(
-        self, client: httpx.AsyncClient, payload: dict[str, Any], on_delta: StreamCallback
+        self,
+        client: httpx.AsyncClient,
+        payload: dict[str, Any],
+        on_delta: StreamCallback,
+        credential: Credential | None = None,
     ) -> ModelResponse:
         content_parts: list[str] = []
         tool_acc: dict[int, dict[str, Any]] = {}
@@ -115,13 +174,23 @@ class OpenAICompatModel(ChatModel):
         model_name = self.model_name
 
         async with client.stream(
-            "POST", self.endpoint, headers=self._headers(), json=payload
+            "POST", self.endpoint, headers=self._headers(credential), json=payload
         ) as resp:
             if resp.status_code >= 400:
                 body = (await resp.aread()).decode("utf-8", errors="replace")
+                # Classified here too. A stream that fails on billing must say
+                # so, and the streaming path is the one the console uses.
+                reason = classify_failure(resp.status_code, body)
+                if credential is not None:
+                    self.pool.mark_failed(credential, reason)
+                detail = explain(reason, provider=self.provider, model=self.spec.model)
+                message = f"HTTP {resp.status_code}: {body[:400]}"
+                if detail:
+                    message = f"{message}\n{detail}"
                 raise ModelError(
-                    f"HTTP {resp.status_code}: {body[:400]}",
-                    retryable=resp.status_code in _RETRYABLE_STATUS,
+                    message,
+                    retryable=reason not in PERMANENT,
+                    failure_reason=reason,
                 )
             async for line in resp.aiter_lines():
                 if not line or not line.startswith("data:"):
