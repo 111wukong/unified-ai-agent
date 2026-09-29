@@ -61,19 +61,27 @@
   </aside>
 
   <main id="main">
+    <header id="topbar">
+      <div class="topbar-left">
+        <span class="topbar-title" id="topbar-title">Console</span>
+        <span class="chip" id="topbar-status">idle</span>
+      </div>
+      <div class="topbar-right" id="topbar-meta"></div>
+    </header>
+
     <div id="transcript">
       <div id="empty" class="empty">
         <div class="empty-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
             <path d="M4 17V7a2 2 0 0 1 2-2h9l5 5v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/>
             <path d="M14 5v5h5"/>
             <path d="M8.5 13.5 11 16l4.5-5"/>
           </svg>
         </div>
-        <p class="empty-title">No task running</p>
+        <h2 class="empty-title">What should the agent do?</h2>
         <p class="empty-body">
-          Describe what you want done. The agent plans first, then asks before
-          anything that writes, runs or reaches the network.
+          It plans first, then asks before anything that writes, runs or reaches
+          the network.
         </p>
         <div class="empty-examples">
           <button type="button" class="example">运行测试，找出失败原因并修复</button>
@@ -85,7 +93,7 @@
     <div id="approval" class="approval hidden" role="alertdialog" aria-labelledby="approval-title">
       <div class="approval-head">
         <span class="approval-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
             <path d="M12 9v4M12 16.5v.01"/>
             <path d="M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z"/>
           </svg>

@@ -58,6 +58,7 @@ class TestConsoleWiring:
         "app": "layout root, styled only",
         "main": "layout region, styled only",
         "sidebar": "layout region, styled only",
+        "topbar": "layout region; the script reads its children, not itself",
         "approval-title": "referenced by aria-labelledby",
         "btn-send": "a submit button; the form's submit event handles it",
     }

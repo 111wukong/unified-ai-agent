@@ -40,6 +40,54 @@ function el(tag, className, text) {
   return node;
 }
 
+/* The one argument worth showing on the collapsed line.
+ *
+ * A tool call is identified by what it acted on -- `read_file orders/calc.py`
+ * -- not by its JSON. Showing the JSON is what made a run of eight reads take
+ * eight screens. */
+const ARG_KEYS = ["path", "command", "target", "url", "pattern", "query", "name", "id"];
+
+function summariseArgs(raw) {
+  if (!raw) return "";
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return ""; // still streaming; the full JSON is in the expanded body
+  }
+  if (!parsed || typeof parsed !== "object") return "";
+  for (const key of ARG_KEYS) {
+    const value = parsed[key];
+    if (typeof value === "string" && value) {
+      return value.length > 58 ? `${value.slice(0, 55)}…` : value;
+    }
+  }
+  const first = Object.values(parsed).find((value) => typeof value === "string" && value);
+  return first ? String(first).slice(0, 58) : "";
+}
+
+/* Follow the tail, but only once per frame, and never while the reader is
+ * somewhere else.
+ *
+ * This used to run on every streamed token, reading `scrollHeight` each time --
+ * a forced synchronous layout per token, which is the classic way to make a
+ * streaming UI stutter. It also yanked the view back to the bottom while
+ * someone was scrolling up to read what had already happened.
+ */
+let scrollQueued = false;
+
+function scrollToBottom(force = false) {
+  if (scrollQueued) return;
+  scrollQueued = true;
+  requestAnimationFrame(() => {
+    scrollQueued = false;
+    const box = $("transcript");
+    if (!box) return;
+    const distance = box.scrollHeight - box.scrollTop - box.clientHeight;
+    if (force || distance < 120) box.scrollTop = box.scrollHeight;
+  });
+}
+
 function addTurn(kind, title) {
   $("empty")?.classList.add("hidden");
   const turn = el("div", `turn ${kind}`);
@@ -47,7 +95,7 @@ function addTurn(kind, title) {
   head.append(el("span", "", title));
   turn.append(head);
   $("transcript").append(turn);
-  $("transcript").scrollTop = $("transcript").scrollHeight;
+  scrollToBottom(true);
   return turn;
 }
 
@@ -64,6 +112,17 @@ function setStatus(text, busy = false) {
   // rather than the wording -- "waiting_confirmation" should look like a
   // warning, and it should keep looking like one if the label is reworded.
   node.dataset.state = String(text || "idle");
+
+  // The header chip tracks the live state too. Otherwise it only moves when
+  // the task list polls, so the header could say "running" for five seconds
+  // after the run had already stopped -- and the two status lines on screen
+  // would disagree.
+  const chip = $("topbar-status");
+  if (chip) {
+    chip.className = `chip ${STATUS_TONE[text] || ""}`.trim();
+    chip.textContent = STATUS_LABEL[text] || text;
+    chip.title = text;
+  }
 }
 
 /* Effects the UI may grant. SYSTEM_ADMIN is absent on purpose: the server
@@ -100,27 +159,137 @@ function approvedEffects() {
   );
 }
 
-function statusChip(status) {
-  const tone =
-    {
-      completed: "chip-ok",
-      failed: "chip-danger",
-      cancelled: "chip-danger",
-      waiting_confirmation: "chip-warn",
-      running: "chip-accent",
-      planning: "chip-accent",
-      pending: "chip-accent",
-    }[status] || "";
-  // Short label, full value in the tooltip. `waiting_confirmation` is a wire
-  // value; as a UI label it is both long and jargon, and it wrapped the row.
-  const label =
-    {
-      waiting_confirmation: "waiting",
-      completed: "done",
-    }[status] || status;
-  const chip = el("span", `chip ${tone}`.trim(), label);
-  chip.title = status;
-  return chip;
+const STATUS_TONE = {
+  completed: "chip-ok",
+  failed: "chip-danger",
+  cancelled: "chip-danger",
+  waiting_confirmation: "chip-warn",
+  running: "chip-accent",
+  planning: "chip-accent",
+  pending: "chip-accent",
+};
+
+// Short label, full value in the tooltip. `waiting_confirmation` is a wire
+// value; as a UI label it is both long and jargon, and it wrapped the row.
+const STATUS_LABEL = {
+  waiting_confirmation: "waiting",
+  completed: "done",
+};
+
+const taskNodes = new Map();
+
+function taskRow(task) {
+  const item = el("div", "task-item");
+  const goal = el("div", "task-goal");
+  const meta = el("div", "task-meta");
+  const chip = el("span", "chip");
+  const stats = el("span", "task-stats");
+  meta.append(chip, stats);
+  item.append(goal, meta);
+  item.onclick = async () => {
+    state.taskId = task.id;
+    clearTranscript();
+    state.current = newRun();
+    // Order matters: `attach` opens an SSE stream and does not resolve until
+    // the stream ends, so anything awaited after it never runs. Read the
+    // approval state first, then start streaming.
+    await syncApproval(task.id);
+    attach(task.id).catch((error) => console.warn("attach failed", error));
+    refreshTasks();
+  };
+  return { item, goal, chip, stats };
+}
+
+/* Write only when the value actually changed.
+ *
+ * Assigning `textContent` replaces the text node even when the string is
+ * identical, which is still a mutation: the browser drops and rebuilds the
+ * node, and anything observing the subtree sees a change. Polling every five
+ * seconds meant doing that to every row forever, for no reason -- and a
+ * MutationObserver watching the list could never tell "nothing happened" from
+ * "everything happened".
+ */
+function setText(node, value) {
+  if (node.textContent !== value) node.textContent = value;
+}
+
+function setClass(node, value) {
+  if (node.className !== value) node.className = value;
+}
+
+function setTitle(node, value) {
+  if (node.title !== value) node.title = value;
+}
+
+function paintTask(node, task) {
+  setText(node.goal, task.goal);
+  setTitle(node.goal, task.goal);
+  setClass(node.chip, `chip ${STATUS_TONE[task.status] || ""}`.trim());
+  setText(node.chip, STATUS_LABEL[task.status] || task.status);
+  setTitle(node.chip, task.status);
+  setText(node.stats, `${task.steps_used} steps · ${task.tokens_in + task.tokens_out} tok`);
+  node.item.classList.toggle("active", task.id === state.taskId);
+}
+
+/* The header says which task you are looking at and what it is doing. Without
+ * it the content floated in the middle of a dark rectangle with nothing to
+ * anchor it -- and no way to tell at a glance whether the thing on screen was
+ * still running. */
+function renderTopbar(task) {
+  setText($("topbar-title"), task ? task.id : "console");
+  setTitle($("topbar-title"), task ? task.goal : "");
+
+  const chip = $("topbar-status");
+  setClass(chip, `chip ${STATUS_TONE[task?.status] || ""}`.trim());
+  setText(chip, task ? STATUS_LABEL[task.status] || task.status : "idle");
+  setTitle(chip, task?.status || "");
+
+  const meta = $("topbar-meta");
+  const wanted = task
+    ? `${task.steps_used} steps · ${task.tokens_in + task.tokens_out} tok`
+    : "";
+  if (meta.textContent !== wanted) meta.textContent = wanted;
+}
+
+async function refreshTasks() {
+  try {
+    const tasks = await json("/api/v1/tasks?limit=15");
+    const list = $("tasks");
+
+    if (!tasks.length) {
+      taskNodes.clear();
+      list.replaceChildren(el("div", "task-empty", "Nothing yet."));
+      $("task-count").textContent = "";
+      return;
+    }
+
+    const ids = tasks.map((task) => task.id).join();
+    if (ids !== [...taskNodes.keys()].join()) {
+      // The *set* changed, so rebuild. Doing this on every poll -- which is
+      // what it used to do -- destroys the element under the pointer every
+      // five seconds: hover flickers, and a click lands on a node that is
+      // already gone.
+      const next = new Map();
+      list.replaceChildren();
+      for (const task of tasks) {
+        const node = taskNodes.get(task.id) || taskRow(task);
+        paintTask(node, task);
+        list.append(node.item);
+        next.set(task.id, node);
+      }
+      taskNodes.clear();
+      for (const [id, node] of next) taskNodes.set(id, node);
+    } else {
+      for (const task of tasks) paintTask(taskNodes.get(task.id), task);
+    }
+
+    $("task-count").textContent = String(tasks.length);
+    // The most recent task is the one a resume would target.
+    if (!state.taskId) state.taskId = tasks[0].id;
+    renderTopbar(tasks.find((task) => task.id === state.taskId) || null);
+  } catch (error) {
+    console.warn("task list unavailable", error);
+  }
 }
 
 /* Show the approval panel for a task that is *already* waiting.
@@ -204,18 +373,25 @@ function renderEvent(event) {
       const body = run.messageText.get(event.messageId);
       if (body) {
         body.textContent += event.delta || "";
-        $("transcript").scrollTop = $("transcript").scrollHeight;
+        scrollToBottom();
       }
       break;
     }
 
     case "TOOL_CALL_START": {
-      const node = el("div", "tool running");
-      const head = el("div", "tool-head");
-      // The name is the label. A chip reading "tool" next to the tool's own
-      // name says nothing and costs a line of visual noise on every call.
-      head.append(el("span", "chip", event.toolCallName));
+      // One line per call, expandable. A card per call with its arguments
+      // always visible turns a run of eight reads into eight screens of
+      // JSON -- which is what a log file looks like, not a tool.
+      const node = el("details", "tool running");
+      const head = el("summary", "tool-head");
+      const mark = el("span", "tool-mark", "·");
+      head.append(mark, el("span", "tool-name", event.toolCallName));
       node.append(head);
+
+      const args = el("pre", "tool-args");
+      node.append(args);
+      node.dataset.args = "";
+
       run.assistant.append(node);
       run.tools.set(event.toolCallId, node);
       break;
@@ -224,8 +400,15 @@ function renderEvent(event) {
     case "TOOL_CALL_ARGS": {
       const node = run.tools.get(event.toolCallId);
       if (node) {
-        const args = node.querySelector("pre") || node.appendChild(el("pre"));
-        args.textContent += event.delta || "";
+        node.dataset.args += event.delta || "";
+        const args = node.querySelector(".tool-args");
+        if (args) args.textContent = node.dataset.args;
+        const hint = summariseArgs(node.dataset.args);
+        const label = node.querySelector(".tool-arg");
+        if (hint) {
+          if (label) setText(label, hint);
+          else node.querySelector(".tool-head")?.append(el("span", "tool-arg", hint));
+        }
       }
       break;
     }
@@ -233,13 +416,13 @@ function renderEvent(event) {
     case "TOOL_CALL_RESULT": {
       const node = run.tools.get(event.toolCallId);
       if (node) {
-        node.classList.remove("running");
         const ok = !event.metadata || event.metadata.success !== false;
+        node.classList.remove("running");
         node.classList.add(ok ? "ok" : "failed");
-        const details = el("details");
-        details.append(el("summary", "", ok ? "result" : "failed"));
-        details.append(el("pre", "", String(event.content ?? "").slice(0, 4000)));
-        node.append(details);
+        setText(node.querySelector(".tool-mark"), ok ? "✓" : "✕");
+        const result = el("pre", "tool-result");
+        result.textContent = String(event.content ?? "").slice(0, 4000);
+        node.append(result);
       }
       break;
     }
@@ -247,8 +430,8 @@ function renderEvent(event) {
     case "ACTIVITY_SNAPSHOT": {
       if (event.activityType !== "PLAN") break;
       if (!run.plan) {
-        const wrapper = el("div", "tool");
-        wrapper.append(el("div", "tool-head", "plan"));
+        const wrapper = el("section", "plan-card");
+        wrapper.append(el("div", "plan-label", "plan"));
         run.plan = el("div", "plan");
         wrapper.append(run.plan);
         run.assistant.append(wrapper);
@@ -301,16 +484,20 @@ function renderEvent(event) {
 function renderCustom(event) {
   const run = state.current;
   if (event.name === "usage" && run.assistant) {
+    // One chip that updates, not one per model call. A run makes a call per
+    // step, and appending a chip each time buried the turn header under a row
+    // of near-identical numbers.
     const value = event.value || {};
-    run.assistant
-      .querySelector(".turn-head")
-      ?.append(
-        el(
-          "span",
-          "chip",
-          `${value.model || "?"} · ${value.totalTokens || 0} tok · $${(value.costUsd || 0).toFixed(4)}`
-        )
-      );
+    run.usage = (run.usage || 0) + (value.totalTokens || 0);
+    const head = run.assistant.querySelector(".turn-head");
+    if (head) {
+      let chip = head.querySelector(".usage-chip");
+      if (!chip) {
+        chip = el("span", "chip usage-chip");
+        head.append(chip);
+      }
+      setText(chip, `${value.model || "?"} · ${run.usage} tok`);
+    }
   }
   if (event.name === "context_compacted" && run.assistant) {
     run.assistant.append(el("div", "dim", "context compacted — older steps summarised"));
@@ -381,12 +568,42 @@ async function streamRun(body) {
   await consume(response);
 }
 
+/* Attach to a task, and re-attach if the connection drops while it is still
+ * going.
+ *
+ * The server holds the stream open for the whole run and only closes it when
+ * the task reaches a terminal state, so under normal conditions this loop
+ * runs once. What it is for is the abnormal case: the server restarts, the
+ * machine sleeps, the connection is reset. Without it the transcript simply
+ * stops updating, with no error and no indication that anything is wrong --
+ * the page looks like the task is still thinking.
+ */
 async function attach(taskId) {
-  const response = await fetch(`/api/v1/tasks/${taskId}/stream`, {
-    headers: authHeaders(),
-  });
-  if (!response.ok) throw new Error(`${response.status} attaching to ${taskId}`);
-  await consume(response);
+  const live = new Set(["pending", "planning", "running"]);
+  for (;;) {
+    if (state.taskId !== taskId) return; // the user moved to another task
+
+    let response;
+    try {
+      response = await fetch(`/api/v1/tasks/${taskId}/stream`, {
+        headers: authHeaders(),
+      });
+    } catch (error) {
+      if (state.taskId !== taskId) return;
+      console.warn("stream connect failed, retrying", error);
+      await new Promise((r) => setTimeout(r, 1500));
+      continue;
+    }
+    if (!response.ok) throw new Error(`${response.status} attaching to ${taskId}`);
+
+    await consume(response);
+    if (state.taskId !== taskId) return;
+
+    const task = await json(`/api/v1/tasks/${taskId}`).catch(() => null);
+    if (!task || !live.has(task.status)) return;
+    console.warn(`stream ended while ${taskId} is ${task.status}; re-attaching`);
+    await new Promise((r) => setTimeout(r, 800));
+  }
 }
 
 async function consume(response) {
@@ -473,48 +690,6 @@ async function cancel() {
 }
 
 /* -------------------------------------------------------------------- boot */
-
-async function refreshTasks() {
-  try {
-    const tasks = await json("/api/v1/tasks?limit=15");
-    const list = $("tasks");
-    list.replaceChildren();
-    $("task-count").textContent = tasks.length ? String(tasks.length) : "";
-    if (!tasks.length) {
-      list.append(el("div", "task-empty", "Nothing yet."));
-    }
-    for (const task of tasks) {
-      const item = el("div", "task-item" + (task.id === state.taskId ? " active" : ""));
-      item.append(el("div", "task-goal", task.goal));
-      const meta = el("div", "task-meta");
-      meta.append(statusChip(task.status));
-      meta.append(
-        el("span", "", `${task.steps_used} steps · ${task.tokens_in + task.tokens_out} tok`),
-      );
-      item.append(meta);
-      item.onclick = async () => {
-        state.taskId = task.id;
-        clearTranscript();
-        state.current = newRun();
-        // Order matters: `attach` opens an SSE stream and does not resolve
-        // until the stream ends, so anything awaited after it never runs.
-        // Read the approval state first, then start streaming.
-        await syncApproval(task.id);
-        attach(task.id).catch((error) => console.warn("attach failed", error));
-        refreshTasks();
-      };
-      list.append(item);
-    }
-    // The most recent task is the one a resume would target.
-    if (!state.taskId && tasks.length) state.taskId = tasks[0].id;
-  } catch (error) {
-    console.warn("task list unavailable", error);
-  }
-}
-
-/* The sandbox report used to be one joined string, which wrapped into a wall
-   of prose that pushed everything else off the panel. It is structured data:
-   show it as rows, and put the caveats in a block that reads as a caveat. */
 
 function sandboxRow(key, value, tone) {
   const row = el("div", "sandbox-row");
