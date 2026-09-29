@@ -25,6 +25,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from unified_agent.agent.context import ContextBuilder
+from unified_agent.agent.execution_identity import ExecutionIdentity, fingerprint, verify
 from unified_agent.agent.executor import FINISH_TOOL, PLAN_TOOL, SKILL_TOOL, ToolRunner
 from unified_agent.agent.planner import Planner, apply_plan_update
 from unified_agent.agent.state import (
@@ -238,6 +239,7 @@ class AgentRuntime:
         return result
 
     async def resume(self, task_id: str, *, max_steps: int | None = None) -> AgentResult:
+        started = time.time()
         task = self.store.get_task(task_id)
         if task is None:
             raise ValueError(f"unknown task {task_id}")
@@ -289,6 +291,14 @@ class AgentRuntime:
             pending = state.approved_pending
             state.approved_pending = None
             self._progress("approval_granted", {"tool": pending.tool, "effect": pending.effect})
+            # The approval was for a specific thing. If that thing is no longer
+            # what would run -- a different binary resolves, or the file was
+            # edited while the request sat waiting -- the approval does not
+            # apply to it, and executing anyway would be acting on consent that
+            # was given for something else.
+            drift = self._identity_drift(pending, state)
+            if drift:
+                return self._fail(state, drift, started)
             # Execute the *same* call the model chose. `approved=True` only
             # affects the scratchpad label -- the call itself is a first
             # execution, not a replay.
@@ -301,6 +311,21 @@ class AgentRuntime:
         elif state.denied_pending is not None:
             pending = state.denied_pending
             state.denied_pending = None
+            limit = self.settings.permissions.confirmations.denial_limit
+            remaining = limit - state.denied_streak
+            if limit > 0 and remaining <= 0:
+                # A run of refusals is a human saying no, and every further
+                # attempt costs a model call and another interruption. Stop
+                # here and say so, rather than letting the model circle the
+                # gate looking for a phrasing that gets through.
+                return self._fail(
+                    state,
+                    f"stopped after {state.denied_streak} consecutive refusals "
+                    f"(limit {limit}): the last was {pending.tool} ({pending.effect}). "
+                    "Nothing further was attempted. If the task genuinely needs that "
+                    "permission, re-run it with the effect pre-approved.",
+                    started,
+                )
             state.append_log(
                 LogEntry(
                     index=0,
@@ -308,7 +333,13 @@ class AgentRuntime:
                     text=(
                         f"The user REFUSED to approve {pending.tool} ({pending.effect}). "
                         "Do not attempt this call or any other route to the same effect. "
-                        "Either finish with what you have, or report the blockage."
+                        "Either finish with what you have, or report the blockage. "
+                        + (
+                            f"This is refusal {state.denied_streak} of {limit}; "
+                            "one more and the task stops automatically."
+                            if limit > 0 and remaining == 1
+                            else ""
+                        )
                     ),
                 )
             )
@@ -749,12 +780,39 @@ class AgentRuntime:
             return ("wall_clock_s", int(time.time() - state.started_at), int(state.deadline - state.started_at))
         return None
 
+    def _identity_drift(self, pending: PendingConfirmation, state: AgentState) -> str | None:
+        """Why the approved call no longer matches what would run, or None.
+
+        Only reached for a call that has already been approved, so the message
+        has to explain that the *approval* is what no longer applies -- not that
+        permission was denied.
+        """
+        recorded = ExecutionIdentity.from_dict(pending.identity)
+        if recorded is None:
+            return None
+        ctx = self._tool_context(state)
+        mismatch = verify(recorded, workspace=ctx.workspace, env=ctx.env)
+        if not mismatch:
+            return None
+        return (
+            f"refusing to run the approved {pending.tool}: {mismatch} "
+            "The approval was for what was shown at the time, so it does not "
+            "cover this. Ask again if you still want it."
+        )
+
     def _pause_for_confirmation(
         self, state: AgentState, need: ConfirmationRequired, started: float
     ) -> AgentResult:
         request_id = f"req_{uuid.uuid4().hex[:10]}"
         tool = self.registry.maybe_get(need.tool)
         preview = tool.preview(need.arguments) if tool else f"{need.tool}({need.arguments})"
+        # Fingerprint what this call will act on, while the human is looking at
+        # it. Checked again immediately before it runs -- see
+        # `execution_identity` for why an approval gate creates this gap.
+        ctx = self._tool_context(state)
+        identity = fingerprint(
+            need.tool, need.arguments, workspace=ctx.workspace, env=ctx.env
+        )
         pending = PendingConfirmation(
             request_id=request_id,
             step_id=state.step_id(),
@@ -763,6 +821,7 @@ class AgentRuntime:
             effect=need.effect,
             reason=str(need),
             preview=preview,
+            identity=identity.as_dict() if identity else {},
         )
         state.pending_confirmation = pending
         state.status = TaskStatus.WAITING_CONFIRMATION
@@ -777,10 +836,14 @@ class AgentRuntime:
                 "effect": pending.effect,
                 "reason": pending.reason,
                 "preview": preview,
+                "identity": pending.identity,
             },
         )
         self._persist(state)
-        self._progress("confirmation", {"preview": preview, "effect": pending.effect})
+        self._progress(
+            "confirmation",
+            {"preview": preview, "effect": pending.effect, "detail": identity.detail if identity else ""},
+        )
         return self._result(state, duration=time.time() - started)
 
     def _complete(self, state: AgentState, answer: str, started: float) -> AgentResult:

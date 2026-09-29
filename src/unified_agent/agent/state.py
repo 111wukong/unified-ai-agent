@@ -160,6 +160,9 @@ class PendingConfirmation(BaseModel):
     effect: str = ""
     reason: str = ""
     preview: str = ""
+    #: Fingerprint of what this call will act on, taken when the request was
+    #: raised and re-checked before it runs. See `execution_identity`.
+    identity: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentState(BaseModel):
@@ -184,6 +187,13 @@ class AgentState(BaseModel):
     # otherwise the model re-decides and the approved call silently vanishes.
     approved_pending: PendingConfirmation | None = None
     denied_pending: PendingConfirmation | None = None
+    #: Consecutive refusals with no successful tool call in between.
+    #:
+    #: Folded from events rather than counted in memory, so a resume in the
+    #: middle of a streak cannot reset it. The point is to notice a pattern:
+    #: one refusal might be a mistake, but a run of them is a human saying no,
+    #: and continuing to ask costs a model call and an interruption each time.
+    denied_streak: int = 0
     answer: str | None = None
     error: str | None = None
     started_at: float = 0.0
@@ -275,6 +285,12 @@ def replay(events: list, *, task_id: str, session_id: str = "") -> AgentState:
         elif kind is EventType.LOG_APPENDED:
             entry = LogEntry(**payload["entry"])
             state.log.append(entry)
+            # A tool call that actually ran means the task is making progress
+            # again, so the refusal streak starts over. Folded rather than kept
+            # in memory so a resume mid-streak does not reset the count and let
+            # the agent circle the gate forever by crashing.
+            if entry.kind == "tool" and entry.success:
+                state.denied_streak = 0
 
         elif kind is EventType.MODEL_RESPONSE:
             state.model_calls += 1
@@ -301,6 +317,7 @@ def replay(events: list, *, task_id: str, session_id: str = "") -> AgentState:
                 effect=payload.get("effect", ""),
                 reason=payload.get("reason", ""),
                 preview=payload.get("preview", ""),
+                identity=payload.get("identity") or {},
             )
             state.status = TaskStatus.WAITING_CONFIRMATION
 
@@ -312,11 +329,15 @@ def replay(events: list, *, task_id: str, session_id: str = "") -> AgentState:
                 state.approved_pending = request
                 state.pending_confirmation = None
                 state.status = TaskStatus.RUNNING
+                # The human said yes to something, so this is not a run of
+                # refusals any more.
+                state.denied_streak = 0
 
         elif kind is EventType.CONFIRMATION_DENIED:
             request = state.pending_confirmation
             if request and request.request_id == payload.get("request_id"):
                 state.denied_pending = request
+                state.denied_streak += 1
             state.pending_confirmation = None
             state.status = TaskStatus.RUNNING
 

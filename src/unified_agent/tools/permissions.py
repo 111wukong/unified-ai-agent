@@ -403,7 +403,12 @@ class CommandGuard:
         head = os.path.basename(argv[0])
         joined = " ".join([head, *argv[1:3]])
         for entry in self.allow:
-            entry_head = entry.split()[0]
+            # `shlex.split`, not `str.split`: an entry may quote an argument
+            # that contains a space, and a bare split would cut it in half.
+            try:
+                entry_head = shlex.split(entry)[0]
+            except ValueError:
+                entry_head = entry
             if head == os.path.basename(entry_head) or joined.startswith(entry):
                 return ALLOW
         return Verdict(

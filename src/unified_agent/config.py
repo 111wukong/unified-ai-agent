@@ -315,6 +315,21 @@ class NetworkPolicy(BaseModel):
     max_response_bytes: int = 2_000_000
 
 
+class ConfirmationPolicy(BaseModel):
+    """How the approval gate behaves when the answer is no."""
+
+    #: Consecutive refusals before the task stops by itself.
+    #:
+    #: One refusal might be a mistake; a run of them is a human saying no. Each
+    #: further attempt costs a model call and another interruption, and a model
+    #: that has been told no will often try a slightly different phrasing of the
+    #: same thing -- which is the behaviour this exists to stop. Reset by any
+    #: approval, and by any tool call that actually runs.
+    #:
+    #: Set to 0 to disable the stop and let the agent keep asking.
+    denial_limit: int = 3
+
+
 class PermissionConfig(BaseModel):
     """Per-effect default decision. Matches the spec's table exactly."""
 
@@ -331,6 +346,7 @@ class PermissionConfig(BaseModel):
     fs: FsPolicy = Field(default_factory=FsPolicy)
     shell: ShellPolicy = Field(default_factory=ShellPolicy)
     network: NetworkPolicy = Field(default_factory=NetworkPolicy)
+    confirmations: ConfirmationPolicy = Field(default_factory=ConfirmationPolicy)
 
     @model_validator(mode="before")
     @classmethod
