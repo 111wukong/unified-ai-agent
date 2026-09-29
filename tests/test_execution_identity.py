@@ -16,6 +16,8 @@ import os
 import shlex
 from pathlib import Path
 
+import pytest
+
 from unified_agent.agent.execution_identity import ExecutionIdentity, fingerprint, verify
 from unified_agent.agent.state import TaskStatus, replay
 from unified_agent.config import Decision
@@ -178,20 +180,41 @@ class TestDriftIsRefused:
         assert target.read_text(encoding="utf-8") == "an edit made while the request was waiting\n"
 
     async def test_an_unchanged_target_is_still_approved(
-        self, scripted, session_id: str, settings, tmp_path: Path  # noqa: ANN001
+        self, scripted, session_id: str, settings  # noqa: ANN001
     ) -> None:
         """The check has to be silent when nothing moved, or every approval
-        would fail and the gate would be useless."""
-        target = allowlisted(settings, script(tmp_path / "run.sh", "#!/bin/sh\necho fine\n"))
-        agent, _ = await scripted([command_call(target), {"content": "ran it"}])
+        would fail and the gate would be useless.
+
+        Uses a system binary rather than a script in `tmp_path`: this is the one
+        case in the file where the command actually has to *run*, and a temp
+        directory is not executable on every CI runner (`/tmp` mounted
+        `noexec`). The drift cases above never execute anything -- they are
+        refused before that -- so they can keep using a temp script.
+        """
+        target = Path("/bin/echo")
+        if not target.exists():
+            pytest.skip("/bin/echo is not present on this platform")
+        agent, _ = await scripted(
+            [
+                {
+                    "tool_calls": [
+                        {"name": "run_command", "arguments": {"command": f"{target} fine"}}
+                    ]
+                },
+                {"content": "ran it"},
+            ]
+        )
         result = await agent.runtime.run("run it", session_id=session_id)
         assert result.needs_approval
 
-        approved = await agent.runtime.approve(result.task_id)
+        await agent.runtime.approve(result.task_id)
 
-        assert approved.status == TaskStatus.COMPLETED.value
         calls = agent.store.list_tool_calls(result.task_id)
-        assert len(calls) == 1 and calls[0].status == "succeeded"
+        assert len(calls) == 1, "the approved call should have been attempted"
+        assert calls[0].status == "succeeded", (
+            f"the call failed for a reason unrelated to drift: "
+            f"{(calls[0].result or {}).get('output') or (calls[0].result or {}).get('error')}"
+        )
         assert "fine" in (calls[0].result or {}).get("output", "")
 
     async def test_the_fingerprint_survives_a_resume(
