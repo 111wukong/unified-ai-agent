@@ -54,9 +54,22 @@ def _base(event_type: str) -> dict[str, Any]:
     return {"type": event_type, "timestamp": int(time.time() * 1000)}
 
 
-def run_started(thread_id: str, run_id: str, *, input_text: str = "") -> dict[str, Any]:
+def run_started(
+    thread_id: str, run_id: str, *, input_text: str = "", task_id: str | None = None
+) -> dict[str, Any]:
+    """The run is beginning.
+
+    `taskId` is an extension to the AG-UI shape, and it is here because a client
+    that started a run otherwise has no way to learn which task it belongs to --
+    `threadId` is the client's own id. Without it the console had to guess, and
+    it guessed wrong: approving an approval prompt posted to whatever task the
+    list happened to have selected, which is a 409 the moment the user has run
+    anything before. A consumer that does not know the field ignores it.
+    """
     event = _base("RUN_STARTED")
     event.update({"threadId": thread_id, "runId": run_id})
+    if task_id:
+        event["taskId"] = task_id
     if input_text:
         event["input"] = {"messages": [{"role": "user", "content": input_text}]}
     return event

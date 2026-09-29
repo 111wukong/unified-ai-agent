@@ -344,10 +344,14 @@ class TestAgUiProtocol:
                 json={"messages": [{"role": "user", "content": "run echo"}], "model": "scripted"},
             )
             parse_sse(first.text)
-            # The SSE stream does not carry the task id, so look it up over
-            # REST. Noted as a gap: a client that wants to resume needs it.
-            tasks = client.get("/api/v1/tasks").json()
-            task_id = tasks[0]["id"]
+            # This used to read the task id back over REST, with a note that the
+            # stream did not carry it. That gap was real and it had teeth: the
+            # console could not tell which task a run belonged to, so approving
+            # a prompt posted to whatever the list had selected -- a 409 the
+            # moment anything had been run before.
+            started = parse_sse(first.text)[0]
+            assert started["type"] == "RUN_STARTED"
+            task_id = started["taskId"]
             assert client.get(f"/api/v1/tasks/{task_id}").json()["status"] == "waiting_confirmation"
 
             resumed = client.post(f"/api/v1/tasks/{task_id}/approve")
@@ -676,6 +680,77 @@ def _referenced_assets(html: str) -> list[str]:
         for target in found
         if not target.startswith(("http://", "https://", "//", "#", "data:"))
     ]
+
+
+class TestApprovingTheRightTask:
+    """A client must be able to learn which task its run belongs to.
+
+    Reported from use: approving a prompt answered `409 task ... has no pending
+    approval`. The console had no way to know the id of the task it had just
+    started, so it posted the approval to whichever task the list had selected
+    -- correct only when the run happened to be that one.
+    """
+
+    def test_run_started_carries_the_task_id(self, api) -> None:  # noqa: ANN001
+        client = api([{"content": "hi"}])
+        with client:
+            events = parse_sse(
+                client.post(
+                    "/agui",
+                    json={"messages": [{"role": "user", "content": "hi"}], "model": "scripted"},
+                ).text
+            )
+            started = events[0]
+            assert started["type"] == "RUN_STARTED"
+            assert started.get("taskId"), "the client cannot resume without it"
+            # And it is the real id, not something derived from the thread.
+            task = client.get(f"/api/v1/tasks/{started['taskId']}")
+        assert task.status_code == 200
+        assert task.json()["goal"] == "hi"
+
+    def test_approving_a_task_that_is_not_waiting_is_a_409(self, api) -> None:  # noqa: ANN001
+        """The error the user saw, pinned down: a real task, nothing pending.
+
+        It is the right answer to the wrong request, which is why the fix is
+        for the client to know its own task id rather than for the server to
+        accept the call.
+        """
+        client = api([{"content": "hi"}])
+        with client:
+            events = parse_sse(
+                client.post(
+                    "/agui",
+                    json={"messages": [{"role": "user", "content": "hi"}], "model": "scripted"},
+                ).text
+            )
+            task_id = events[0]["taskId"]
+            client.post(f"/api/v1/tasks/{task_id}/wait", params={"timeout_s": 30})
+
+            response = client.post(f"/api/v1/tasks/{task_id}/approve")
+        assert response.status_code == 409
+        assert "no pending approval" in response.json()["detail"]
+
+    def test_the_run_id_is_not_the_task_id(self, api) -> None:  # noqa: ANN001
+        """`threadId` and `runId` are the client's own identifiers. A client
+        that confused them would post approvals to a name the server has never
+        heard of."""
+        client = api([{"content": "hi"}])
+        with client:
+            events = parse_sse(
+                client.post(
+                    "/agui",
+                    json={
+                        "threadId": "thread_1",
+                        "runId": "run_1",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "model": "scripted",
+                    },
+                ).text
+            )
+            started = events[0]
+        assert started["threadId"] == "thread_1"
+        assert started["runId"] == "run_1"
+        assert started["taskId"] not in {"thread_1", "run_1"}
 
 
 class TestGuard:

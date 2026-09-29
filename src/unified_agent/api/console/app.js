@@ -381,6 +381,14 @@ function renderEvent(event) {
   const run = state.current;
   switch (event.type) {
     case "RUN_STARTED":
+      // Which task this run is. The stream is the only place the client can
+      // learn it -- `threadId` is the client's own id, not the task's. Without
+      // this, approving an approval prompt posted to whatever task the list
+      // had selected, which is a 409 the moment anything has been run before.
+      if (event.taskId) {
+        state.taskId = event.taskId;
+        refreshTasks();
+      }
       run.assistant = addTurn("assistant", "Agent");
       setStatus("running", true);
       break;
@@ -562,17 +570,33 @@ function hideApproval() {
 }
 
 async function decide(verb) {
-  if (!state.taskId) return;
+  if (!state.taskId) {
+    setStatus("failed", false);
+    addTurn("error", "错误").append(
+      el("div", "body", "不知道该批准哪个任务 —— 界面上没有选中的任务。"),
+    );
+    return;
+  }
   hideApproval();
   const run = newRun();
   state.current = run;
-  run.assistant = addTurn("assistant", "agent");
+  run.assistant = addTurn("assistant", "Agent");
   setStatus(verb === "approve" ? "running" : "idle", true);
   try {
     await json(`/api/v1/tasks/${state.taskId}/${verb}`, { method: "POST" });
     await attach(state.taskId);
   } catch (error) {
-    addTurn("error", "error").append(el("div", "body", String(error)));
+    // A 409 here means the request went to a task that was not waiting, which
+    // is a stale id rather than anything the user did wrong. Naming the task
+    // makes it diagnosable instead of just "409".
+    addTurn("error", "错误").append(
+      el(
+        "div",
+        "body",
+        `${verb === "approve" ? "批准" : "拒绝"}失败：${error}\n` +
+          `打到的任务是 ${state.taskId}`,
+      ),
+    );
     setStatus("failed", false);
   }
 }

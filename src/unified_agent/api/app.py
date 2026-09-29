@@ -707,7 +707,7 @@ async def _agui_events(
 
     async with bus.subscribe(task_id) as sub:
         if announce_start:
-            yield agui.run_started(thread_id, run_id)
+            yield agui.run_started(thread_id, run_id, task_id=task_id)
         if launch is not None:
             launched = svc.track(task_id, launch)
 
