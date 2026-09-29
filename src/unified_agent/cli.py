@@ -824,6 +824,44 @@ def task_rewind(
         )
 
 
+@task_app.command("search")
+def task_search(
+    query: str,
+    limit: int = typer.Option(8, "--limit", "-n"),
+    all_tasks: bool = typer.Option(
+        False, "--all", help="Include sub-agent and workflow-child tasks."
+    ),
+    home: Optional[Path] = typer.Option(None, "--home"),
+) -> None:
+    """Find past tasks by goal or by their final answer."""
+    settings = _settings(home, None)
+    store = _read_store(settings)
+    try:
+        rows = store.search_tasks(query, limit=limit, include_children=all_tasks)
+    finally:
+        store.close()
+
+    if not rows:
+        console.print(f"no task matches {query!r}")
+        console.print(
+            "[dim]Sub-agent tasks are excluded by default; pass --all to include them.[/dim]"
+        )
+        return
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    table.add_column("task", style="cyan", no_wrap=True)
+    table.add_column("status", no_wrap=True)
+    table.add_column("when", no_wrap=True)
+    table.add_column("goal", overflow="fold")
+    for row in rows:
+        table.add_row(
+            row["id"],
+            row["status"],
+            (row.get("created_at") or "")[:16].replace("T", " "),
+            row["goal"][:120],
+        )
+    console.print(table)
+
+
 @task_app.command("resume")
 def task_resume(
     task_id: str,

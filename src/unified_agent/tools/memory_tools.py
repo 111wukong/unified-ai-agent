@@ -290,10 +290,91 @@ class FinishTool(Tool):
         )
 
 
+class RecallTool(Tool):
+    """Search this agent's own past tasks.
+
+    Distinct from `search_memory`: memory holds facts the agent decided were
+    worth keeping, while this searches what it actually *did* -- the goal it was
+    given and the answer it produced. "Have I worked on this before" and "what
+    did I conclude last time" are questions the memory store cannot answer,
+    because nothing decided they were facts.
+    """
+
+    spec = ToolSpec(
+        name="recall",
+        description=(
+            "Search past tasks by goal or by their final answer. Use this when "
+            "the user refers to earlier work ('like last time', 'the thing we "
+            "did before') or before starting something that sounds familiar. "
+            "Returns matching task ids; read one with `uaa task show`."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 25},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        effect_class=EffectClass.READ_ONLY,
+    )
+
+    def __init__(self, store: Any) -> None:
+        self.store = store
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if ctx.dry_run:
+            return self.dry_run(args, ctx)
+        rows = self.store.search_tasks(
+            args["query"], limit=int(args.get("limit") or 8)
+        )
+        if not rows:
+            return ToolResult(
+                success=True,
+                output=(
+                    "no past task matches that. Either this is new work, or the "
+                    "wording differs -- try the words from the goal itself."
+                ),
+                metadata={"matches": 0},
+            )
+        lines = []
+        for row in rows:
+            age = _ago(row.get("created_at") or "")
+            lines.append(
+                f"- {row['id']}  [{row['status']}]  {age}  {row['goal'][:160]}"
+            )
+        return ToolResult(
+            success=True,
+            output="\n".join(lines),
+            metadata={"matches": len(rows), "ids": [r["id"] for r in rows]},
+        )
+
+
+def _ago(created_at: str) -> str:
+    """A rough age, so a list of tasks is ordered in the reader's head too."""
+    from datetime import datetime, timezone
+
+    try:
+        when = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return "?"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - when
+    seconds = int(delta.total_seconds())
+    if seconds < 3600:
+        return f"{max(seconds, 0) // 60}m ago"
+    if seconds < 86_400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86_400}d ago"
+
+
 def build_memory_tools(store, memory: Any = None) -> list[Tool]:
     return [
         SaveMemoryTool(store, memory),
         SearchMemoryTool(store, memory),
+        RecallTool(store),
         DeleteMemoryTool(store),
     ]
 

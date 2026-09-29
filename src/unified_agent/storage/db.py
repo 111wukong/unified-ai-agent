@@ -147,6 +147,36 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
     VALUES (new.rowid, new.content, new.tags);
 END;
 
+-- Task history, searchable.
+--
+-- A task's own record already exists -- the goal, the answer, every event --
+-- and none of it was reachable: an agent asked to "do the thing I did last
+-- week" had no way to find out what that was. Indexed over the projection
+-- rather than the event log because the goal and the final answer are what
+-- anyone actually searches for, and the projection already holds both.
+CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
+    goal,
+    result,
+    content='tasks',
+    content_rowid='rowid',
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS tasks_ai AFTER INSERT ON tasks BEGIN
+    INSERT INTO tasks_fts(rowid, goal, result)
+    VALUES (new.rowid, new.goal, new.result);
+END;
+CREATE TRIGGER IF NOT EXISTS tasks_ad AFTER DELETE ON tasks BEGIN
+    INSERT INTO tasks_fts(tasks_fts, rowid, goal, result)
+    VALUES ('delete', old.rowid, old.goal, old.result);
+END;
+CREATE TRIGGER IF NOT EXISTS tasks_au AFTER UPDATE ON tasks BEGIN
+    INSERT INTO tasks_fts(tasks_fts, rowid, goal, result)
+    VALUES ('delete', old.rowid, old.goal, old.result);
+    INSERT INTO tasks_fts(rowid, goal, result)
+    VALUES (new.rowid, new.goal, new.result);
+END;
+
 -- Memory vectors live in their own table rather than a column on
 -- `memories`: the dimension depends on the embedding model, and a rebuild
 -- with a different model must be able to drop and refill this without

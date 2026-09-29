@@ -502,6 +502,79 @@ class Store:
             )
         return mid
 
+    def search_tasks(
+        self,
+        query: str,
+        *,
+        limit: int = 8,
+        include_children: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Find past tasks by goal or final answer.
+
+        Sub-agent and workflow-child tasks are excluded by default. They are
+        this runtime's own fan-out rather than history: one multi-agent run
+        writes a task per worker, and including them buries the handful of tasks
+        the *user* started under the ones the runtime invented. Hermes hides
+        them from its session search for the same reason.
+
+        The query is quoted before it reaches FTS5. A raw string can contain
+        `"`, `*` or `NEAR`, each of which is syntax, and a search box that
+        throws on a stray quote is worse than one that finds nothing.
+        """
+        text = (query or "").strip()
+        if not text:
+            return []
+        rows = self._search_tasks_fts(text, limit=limit, include_children=include_children)
+        if rows:
+            return rows
+        # The `trigram` tokenizer indexes three-character sequences, so a query
+        # shorter than that matches nothing -- and two-character words are the
+        # common case in Chinese ("边界", "缓存", "测试"). Falling back to a
+        # scan keeps a short query from silently finding nothing, which is
+        # indistinguishable from "there is no such task".
+        return self._search_tasks_like(text, limit=limit, include_children=include_children)
+
+    def _search_tasks_fts(
+        self, text: str, *, limit: int, include_children: bool
+    ) -> list[dict[str, Any]]:
+        phrase = '"' + text.replace('"', '""') + '"'
+        sql = (
+            "SELECT t.id, t.session_id, t.parent_task_id, t.goal, t.status,"
+            " t.created_at, t.updated_at, t.steps_used, t.tokens_in, t.tokens_out,"
+            " bm25(tasks_fts) AS rank"
+            " FROM tasks_fts JOIN tasks t ON t.rowid = tasks_fts.rowid"
+            " WHERE tasks_fts MATCH ?"
+        )
+        if not include_children:
+            sql += " AND t.parent_task_id IS NULL"
+        sql += " ORDER BY rank LIMIT ?"
+        try:
+            rows = self.conn.execute(sql, (phrase, limit)).fetchall()
+        except sqlite3.OperationalError:
+            # Unbalanced quotes and the like reach FTS5 as syntax. A search box
+            # that raises on a stray character is worse than one that finds
+            # nothing, and the LIKE pass below will still try.
+            return []
+        return [dict(row) for row in rows]
+
+    def _search_tasks_like(
+        self, text: str, *, limit: int, include_children: bool
+    ) -> list[dict[str, Any]]:
+        pattern = f"%{text}%"
+        sql = (
+            "SELECT t.id, t.session_id, t.parent_task_id, t.goal, t.status,"
+            " t.created_at, t.updated_at, t.steps_used, t.tokens_in, t.tokens_out,"
+            " 0.0 AS rank"
+            " FROM tasks t WHERE (t.goal LIKE ? OR t.result LIKE ?)"
+        )
+        params: list[Any] = [pattern, pattern]
+        if not include_children:
+            sql += " AND t.parent_task_id IS NULL"
+        sql += " ORDER BY t.created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
     def search_memories(
         self,
         query: str,
