@@ -40,6 +40,12 @@ class EventType(str, Enum):
     TOOL_FAILED = "tool_failed"
     TOOL_REPLAYED = "tool_replayed"
     TOOL_AMBIGUOUS = "tool_ambiguous"
+    #: A call that was refused because the agent had already made the exact
+    #: same call and would have learned nothing new. Distinct from TOOL_FAILED
+    #: because nothing went wrong -- the runtime declined to spend the tokens.
+    #: Recorded so a task that ends on a step budget can be told apart from
+    #: one that ended because the agent would not stop re-reading.
+    TOOL_REPEATED = "tool_repeated"
     #: A pre-image of a file, captured *before* a write tool touches it.
     #:
     #: Recorded before execution, not after, for the same reason the tool

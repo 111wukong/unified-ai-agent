@@ -421,6 +421,11 @@ class AgentConfig(BaseModel):
     tool_output_chars: int = 8_000
     # Observations older than the newest N get compacted into a summary.
     keep_recent_observations: int = 6
+    # How many times the *same* pure read (tool + arguments) may be executed
+    # before the runtime refuses it. A read cannot return anything new while
+    # the file is unchanged, so the third ask is a loop, not a lookup.
+    # 0 disables the refusal (the annotation still applies).
+    repeat_read_limit: int = 3
     # Fraction of the context window reserved for the model's own output.
     output_reserve_ratio: float = 0.15
     # Post-task memory + skill-candidate extraction. Off by default because

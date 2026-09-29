@@ -160,10 +160,24 @@ class ModelResponse(BaseModel):
 
 
 def idempotency_key(task_id: str, step_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
-    """Deterministic key for "this exact call, in this exact step".
+    """Stable identity for "this exact call, in this exact task and step".
 
-    Deliberately excludes attempt number: two attempts of the same logical
-    call share a key so the resume logic can detect a re-run.
+    **What reads it.** Only the ledger column and the AG-UI encoder (which
+    falls back to it for a `call_id`). It is *not* what resume uses to decide
+    whether a call already ran -- resume keys off the ledger row's `status`,
+    because "was this started and never finished" is a fact the row records
+    directly and a hash cannot.
+
+    It was previously documented as letting "the resume logic detect a
+    re-run". That was never true, and the mistake was load-bearing: a reader
+    trusting the docstring would have assumed crash-recovery was hash-based
+    and left the status check out.
+
+    **It collides by design.** `step_id` is the *plan* step, so every call
+    made while a plan step is in progress shares a step id. One real run
+    produced 120 rows and 38 distinct keys, one of them 15 times over. So do
+    not reach for this as a dedup key -- repetition is counted by
+    `repetition.call_signature`, which deliberately excludes task and step.
     """
     payload = json.dumps(
         {"task": task_id, "step": step_id, "tool": tool_name, "args": arguments},

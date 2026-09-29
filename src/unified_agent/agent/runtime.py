@@ -28,11 +28,14 @@ from unified_agent.agent.context import ContextBuilder
 from unified_agent.agent.execution_identity import ExecutionIdentity, fingerprint, verify
 from unified_agent.agent.executor import FINISH_TOOL, PLAN_TOOL, SKILL_TOOL, ToolRunner
 from unified_agent.agent.planner import Planner, apply_plan_update
+from unified_agent.agent import repetition
+from unified_agent.agent.repetition import call_signature
 from unified_agent.agent.state import (
     AgentState,
     LogEntry,
     PendingConfirmation,
     TaskStatus,
+    _compact_args,
     replay,
 )
 from unified_agent.config import Settings
@@ -421,11 +424,22 @@ class AgentRuntime:
                 self.store.append(
                     state.task_id,
                     EventType.BUDGET_EXCEEDED,
-                    {"kind": over[0], "used": over[1], "limit": over[2]},
+                    {
+                        "kind": over[0],
+                        "used": over[1],
+                        "limit": over[2],
+                        "repeated_calls": sum(
+                            1 for n in state.call_counts.values() if n > 1
+                        ),
+                        "redundant_calls": sum(
+                            n - 1 for n in state.call_counts.values() if n > 1
+                        ),
+                    },
                 )
                 return self._fail(
                     state,
-                    f"stopped: {over[0]} budget exhausted ({over[1]} / {over[2]})",
+                    f"stopped: {over[0]} budget exhausted ({over[1]} / {over[2]})"
+                    + self._budget_diagnosis(state),
                     started,
                 )
             if self.is_cancelled(state.task_id):
@@ -503,11 +517,88 @@ class AgentRuntime:
                 if result is not None:
                     return result
                 continue
-            entry = await self._runner.execute(call, state=state, ctx=self._tool_context(state))
+
+            verdict = self._repeat_verdict(call, state)
+            if verdict.blocked:
+                self._refuse_repeat(call, state, verdict)
+                continue
+
+            entry = await self._runner.execute(
+                call,
+                state=state,
+                ctx=self._tool_context(state),
+                annotation=verdict.note if verdict.annotate else "",
+            )
+            if verdict.annotate:
+                self._note_repeat(entry, state, verdict)
             if call.name == SKILL_TOOL and entry.success:
                 self._note_skill_loaded(entry, state)
             self._progress("tool", {"name": call.name, "success": entry.success})
         return None
+
+    def _repeat_verdict(self, call: ToolCall, state: AgentState):
+        """How many times this exact call has been made, and what to do."""
+        signature = call_signature(call.name, call.arguments)
+        return repetition.check(
+            tool=call.name,
+            count=state.call_counts.get(signature, 0),
+            stop_at=self.settings.agent.repeat_read_limit,
+        )
+
+    def _refuse_repeat(self, call: ToolCall, state: AgentState, verdict) -> None:
+        """Decline to spend the tokens, and say so in the model's own log.
+
+        Logged as `kind="system"`, which is load-bearing: only `kind="tool"`
+        entries increment `call_counts`, so a refused repeat does not raise its
+        own count and cannot escalate itself into a permanent block on a call
+        the model has genuinely stopped making.
+        """
+        self.store.append(
+            state.task_id,
+            EventType.TOOL_REPEATED,
+            {
+                "name": call.name,
+                "arguments": call.arguments,
+                "step_id": state.step_id(),
+                "count": verdict.count,
+                "action": "refused",
+            },
+        )
+        state.append_log(
+            LogEntry(
+                index=0,
+                step_id=state.step_id(),
+                kind="system",
+                text=f"{call.name}({_compact_args(call.arguments)}) — {verdict.note}",
+                success=False,
+            )
+        )
+        self.store.append(
+            state.task_id,
+            EventType.LOG_APPENDED,
+            {"entry": state.log[-1].model_dump(mode="json")},
+        )
+        self._progress("tool", {"name": call.name, "success": False, "repeated": True})
+
+    def _note_repeat(self, entry: LogEntry, state: AgentState, verdict) -> None:
+        """Record that the model repeated itself, for humans and for audits.
+
+        Purely observational: the annotation itself is already inside the
+        entry the executor logged, so there is nothing to fold here. This
+        event exists so `uaa task events` and `scripts/audit-task.py` can see
+        the loop without having to diff observation bodies.
+        """
+        self.store.append(
+            state.task_id,
+            EventType.TOOL_REPEATED,
+            {
+                "name": entry.tool,
+                "arguments": entry.arguments,
+                "step_id": entry.step_id,
+                "count": verdict.count,
+                "action": "annotated",
+            },
+        )
 
     def _note_skill_loaded(self, entry: LogEntry, state: AgentState) -> None:
         """Record which skills a task actually pulled in.
@@ -780,6 +871,31 @@ class AgentRuntime:
             return ("wall_clock_s", int(time.time() - state.started_at), int(state.deadline - state.started_at))
         return None
 
+    def _budget_diagnosis(self, state: AgentState) -> str:
+        """Say *why* the budget ran out, when the reason is that it looped.
+
+        "steps budget exhausted (60 / 60)" is true and useless: it describes
+        the counter, not the behaviour. A run that spent its whole budget
+        re-reading four files has a specific, nameable cause, and naming it is
+        what turns an opaque failure into something a user can act on --
+        either by changing the goal or by fixing the tool the agent could not
+        get an answer out of.
+        """
+        repeats = [(sig, n) for sig, n in state.call_counts.items() if n > 1]
+        if not repeats:
+            return ""
+        redundant = sum(n - 1 for _, n in repeats)
+        total = sum(state.call_counts.values())
+        worst = max(repeats, key=lambda kv: kv[1])
+        # The signature is a hash, so recover the human-readable form from the
+        # log rather than printing it.
+        name, args = _describe_signature(state, worst[0])
+        return (
+            f"; {redundant} of {total} tool calls were exact repeats "
+            f"({len(repeats)} call(s) made more than once). The most repeated was "
+            f"{name}({args}) x{worst[1]}"
+        )
+
     def _identity_drift(self, pending: PendingConfirmation, state: AgentState) -> str | None:
         """Why the approved call no longer matches what would run, or None.
 
@@ -967,6 +1083,21 @@ class AgentRuntime:
                 self.on_progress(kind, payload)
             except Exception:  # noqa: BLE001 - UI must never break a task
                 pass
+
+
+def _describe_signature(state: AgentState, signature: str) -> tuple[str, str]:
+    """Recover the readable form of a call from its hash.
+
+    `call_counts` is keyed on a digest, which is right for folding and wrong
+    for reporting. The log still holds the arguments, so look there. Best
+    effort by design: compaction can drop the entry that had them, and a
+    slightly vaguer failure message is not worth carrying a second copy of
+    every call's arguments in state forever.
+    """
+    for entry in reversed(state.log):
+        if entry.tool and call_signature(entry.tool, entry.arguments) == signature:
+            return entry.tool, _compact_args(entry.arguments)
+    return "an earlier call", "arguments no longer in context"
 
 
 def _empty_response_reason(resp: Any) -> str:

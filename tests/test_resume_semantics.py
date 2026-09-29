@@ -95,6 +95,51 @@ class TestUnfinishedCalls:
         assert "may have run twice" in warnings[0].text
         assert result.status == TaskStatus.COMPLETED.value
 
+    async def test_resume_decides_from_status_not_from_the_key(
+        self, scripted, session_id: str
+    ) -> None:
+        """The decision is "did this row reach a terminal state", not a hash.
+
+        `idempotency_key` used to be documented as letting resume "detect a
+        re-run", which no code did. This pins the real mechanism so the
+        docstring cannot drift back: a row that is already `succeeded` is left
+        alone even though its key is identical to a fresh call's.
+        """
+        agent, _ = await scripted([{"content": "done"}])
+        task_id = await _start_task(agent, session_id)
+        key = idempotency_key(task_id, "step_1", "read_file", {"path": "app.py"})
+
+        finished = agent.store.begin_tool_call(
+            task_id=task_id, step_id="step_1", attempt=1, name="read_file",
+            arguments={"path": "app.py"}, effect_class="read_only", idempotency_key=key,
+        )
+        agent.store.finish_tool_call(finished, status="succeeded", result={"output": "ok"})
+
+        await agent.runtime.resume(task_id)
+
+        rows = agent.store.list_tool_calls(task_id)
+        assert [r.id for r in rows] == [finished], "a finished call must not be re-run"
+        assert agent.store.unfinished_calls(task_id) == []
+
+    def test_the_key_collides_within_a_plan_step(self) -> None:
+        """Documented, not accidental: `step_id` is the plan step, so every
+        call made while one step is in progress shares an id. It is an
+        identity for a ledger row, not a dedup key."""
+        first = idempotency_key("task_1", "step_1", "read_file", {"path": "a.py"})
+        second = idempotency_key("task_1", "step_1", "read_file", {"path": "a.py"})
+        assert first == second
+
+        from unified_agent.agent.repetition import call_signature
+
+        # The repetition guard's signature is the one that must be stable
+        # across tasks and steps, and it is -- which is why it is separate.
+        assert call_signature("read_file", {"path": "a.py"}) == call_signature(
+            "read_file", {"path": "a.py"}
+        )
+        assert idempotency_key("task_1", "step_1", "read_file", {"path": "a.py"}) != (
+            idempotency_key("task_2", "step_1", "read_file", {"path": "a.py"})
+        )
+
     async def test_completed_calls_are_not_reexecuted(self, scripted, session_id: str) -> None:
         agent, _ = await scripted(
             [

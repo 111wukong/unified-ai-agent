@@ -70,6 +70,7 @@ class ToolRunner:
         attempt: int = 1,
         replay_reason: str | None = None,
         approved: bool = False,
+        annotation: str = "",
     ) -> LogEntry:
         step_id = ctx.step_id
         key = idempotency_key(state.task_id, step_id, call.name, call.arguments)
@@ -221,13 +222,25 @@ class ToolRunner:
             tool=call.name,
             arguments=args,
             success=result.success,
-            text=result.as_observation(),
+            # The runtime's note about this being a repeat rides along in the
+            # same observation. Logging it as its own entry instead would put
+            # the warning in a message that reads as unrelated commentary, and
+            # would double-log the call -- which would make the repetition
+            # counter in `replay` count every repeat twice.
+            text=result.as_observation() + (f"\n\n{annotation}" if annotation else ""),
             artifact_path=result.artifact_path,
             attempt=attempt,
             replayed=bool(replay_reason),
             approved=approved,
         )
         state.append_log(entry)
+        # Counted next to the append, so a live run and a `replay` of the same
+        # events produce the same counter. The repetition guard reads this on
+        # the next step; folding it only during replay would leave the guard
+        # blind for the whole first attempt at a task -- which is the attempt
+        # it exists to protect.
+        if entry.tool:
+            state.record_call(entry.tool, entry.arguments)
         self.store.append(
             state.task_id, EventType.LOG_APPENDED, {"entry": entry.model_dump(mode="json")}
         )

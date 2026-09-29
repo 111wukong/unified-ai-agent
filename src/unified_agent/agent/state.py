@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from unified_agent.agent.repetition import call_signature
 from unified_agent.observability.events import EventType
 from unified_agent.types import TokenUsage
 
@@ -194,6 +195,15 @@ class AgentState(BaseModel):
     #: one refusal might be a mistake, but a run of them is a human saying no,
     #: and continuing to ask costs a model call and an interruption each time.
     denied_streak: int = 0
+    #: How many times each *exact* call (tool + arguments) has been made.
+    #:
+    #: Keyed on `repetition.call_signature`, not on the tool name: "read_file
+    #: x16" is not actionable, "read_file(orders/calc.py) x16" is. Folded at
+    #: LOG_APPENDED time rather than recomputed from `state.log`, because
+    #: compaction truncates the log and a counter rebuilt from it would forget
+    #: every repeat that happened before the truncation -- which is precisely
+    #: the history the repetition guard exists to remember.
+    call_counts: dict[str, int] = Field(default_factory=dict)
     answer: str | None = None
     error: str | None = None
     started_at: float = 0.0
@@ -218,6 +228,18 @@ class AgentState(BaseModel):
         entry.index = self.next_log_index()
         self.log.append(entry)
         return entry
+
+    def record_call(self, tool: str, arguments: dict[str, Any]) -> None:
+        """Count one execution of this exact call.
+
+        Called from the one place a tool entry is created (the executor), so
+        the live path and `replay` agree by construction. Folding it only in
+        `replay` would mean the guard works after a resume and not during the
+        run it is supposed to protect -- the counter would be empty for the
+        entire first attempt.
+        """
+        sig = call_signature(tool, arguments)
+        self.call_counts[sig] = self.call_counts.get(sig, 0) + 1
 
     def sync_current_step(self) -> int:
         """Derive the cursor from the checklist instead of tracking it separately.
@@ -291,6 +313,14 @@ def replay(events: list, *, task_id: str, session_id: str = "") -> AgentState:
             # the agent circle the gate forever by crashing.
             if entry.kind == "tool" and entry.success:
                 state.denied_streak = 0
+            # Counted here, not derived from `state.log`: a later
+            # CONTEXT_COMPACTED trims the log, and a counter rebuilt from the
+            # trimmed log would forget the repeats it is supposed to catch.
+            # A refused repeat is logged as `kind="system"`, so it does not
+            # increment -- otherwise a blocked call would raise its own count
+            # and block itself harder on every retry.
+            if entry.kind == "tool" and entry.tool:
+                state.record_call(entry.tool, entry.arguments)
 
         elif kind is EventType.MODEL_RESPONSE:
             state.model_calls += 1

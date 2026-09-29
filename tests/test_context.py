@@ -77,18 +77,38 @@ class TestMessageAssembly:
         assert "you are here" in text
 
     def test_already_called_tools_are_summarised(self, settings) -> None:  # noqa: ANN001
-        """Redundancy guard: models happily re-list the same directory forever."""
+        """Redundancy guard: models happily re-list the same directory forever.
+
+        The block names the *call*, not the tool. It used to say
+        `list_directory x3`, which a real run could not act on -- it could not
+        tell which directory it was looping on, so it listed the same four
+        directories again for another 40 steps.
+        """
         model = _model_for(settings)
         builder = ContextBuilder(settings=settings, model=model, tool_catalog="")
         state = _state()
         for _ in range(3):
-            state.append_log(LogEntry(index=0, kind="tool", tool="list_directory", text="x"))
-        state.append_log(LogEntry(index=0, kind="tool", tool="read_file", text="y"))
+            entry = LogEntry(index=0, kind="tool", tool="list_directory", text="x")
+            entry.arguments = {"path": "."}
+            state.append_log(entry)
+            state.record_call("list_directory", entry.arguments)
+        read = LogEntry(index=0, kind="tool", tool="read_file", text="y")
+        read.arguments = {"path": "app.py"}
+        state.append_log(read)
+        state.record_call("read_file", read.arguments)
 
         text = "\n".join(m.content for m in builder.build(state))
-        assert "list_directory x3" in text
-        assert "read_file x1" in text
-        assert "Do not repeat" in text
+        assert 'list_directory({"path": "."}) x3' in text
+        assert 'read_file({"path": "app.py"})' in text
+        assert "REPEATED" in text
+        assert "Do not make any of these calls again" in text
+        # Only the call that actually repeated is flagged. A call made once is
+        # context, not a loop.
+        repeated_line = next(
+            line for line in text.splitlines() if line.startswith("REPEATED")
+        )
+        assert "list_directory" in repeated_line
+        assert "read_file" not in repeated_line
 
     def test_skills_index_is_in_the_system_prompt(self, settings) -> None:  # noqa: ANN001
         model = _model_for(settings)
@@ -116,9 +136,6 @@ class TestCompaction:
         # Shrink the prompt budget: with a 200k window nothing ever needs
         # compacting, and the test would pass vacuously.
         agent.settings.agent.max_tokens = 4_000
-        # Shrink the prompt budget: with a 200k window nothing ever needs
-        # compacting, and the test would pass vacuously.
-        agent.settings.agent.max_tokens = 4_000
 
         result = await agent.runtime.run("read the big file", session_id=session_id)
         assert result.status == TaskStatus.COMPLETED.value
@@ -132,7 +149,22 @@ class TestCompaction:
         state = replay(events, task_id=result.task_id)
         assert state.compacted_summary
         assert state.log_offset > 0
-        assert len(state.log) <= agent.settings.agent.keep_recent_observations
+        # `keep_recent_observations` is how much is *retained when compaction
+        # fires*, not a hard ceiling: entries appended after the last fire stay
+        # until the next one. The exact invariant is therefore
+        # `keep + everything appended since the last compaction`, and asserting
+        # a bare `<= keep` only passed because the old test happened to end on
+        # a compaction.
+        last_compaction = max(e.seq for e in compacted)
+        after = sum(
+            1
+            for e in events
+            if e.type is EventType.LOG_APPENDED and e.seq > last_compaction
+        )
+        assert len(state.log) == agent.settings.agent.keep_recent_observations + after
+        # And the log really is a small fraction of everything recorded.
+        total = sum(1 for e in events if e.type is EventType.LOG_APPENDED)
+        assert len(state.log) < total
 
     async def test_deterministic_fallback_needs_no_model(self) -> None:
         entries = [

@@ -30,7 +30,8 @@ from unified_agent.agent.prompts import (
     plan_block,
     workspace_block,
 )
-from unified_agent.agent.state import AgentState
+from unified_agent.agent.repetition import call_signature, result_digest
+from unified_agent.agent.state import AgentState, _compact_args
 from unified_agent.config import Settings
 from unified_agent.models.base import ChatModel, estimate_tokens
 from unified_agent.observability.events import EventType
@@ -90,18 +91,13 @@ class ContextBuilder:
             state_block_parts.append(
                 "# Earlier work (compacted)\n\n" + state.compacted_summary
             )
-        called = [e.tool for e in state.log if e.tool]
-        if called:
-            # Cheap redundancy guard. Without it, models happily re-list the
-            # same directory four times, and every one of those costs a turn.
-            counts: dict[str, int] = {}
-            for name in called:
-                counts[name] = counts.get(name, 0) + 1
-            state_block_parts.append(
-                "# Tools already called\n\n"
-                + ", ".join(f"{name} x{n}" for name, n in counts.items())
-                + "\n\nDo not repeat a call whose result you already have."
-            )
+        if state.call_counts:
+            # Keyed on the *call*, not the tool name. "read_file x16" is what
+            # this block used to say, and it is not actionable -- the model
+            # cannot tell which file it is looping on, so it reads the same
+            # four files again. "read_file(orders/calc.py) x16" names the loop,
+            # which is the whole difference between a warning and a fix.
+            state_block_parts.append(self._repeat_block(state))
         if state.approved_effects:
             state_block_parts.append(
                 "# Pre-approved effects\n\n"
@@ -132,6 +128,51 @@ class ContextBuilder:
         )
         return messages
 
+    def _repeat_block(self, state: AgentState) -> str:
+        """Name the calls already made, and call out the ones made twice.
+
+        Two lists, because they need different treatment. Every call made is
+        context the model would otherwise re-derive; the ones made *more than
+        once* are the loop, and saying so explicitly is what the old
+        tool-name-only version could not do.
+        """
+        readable: dict[str, tuple[str, str, int]] = {}
+        for entry in state.log:
+            if entry.tool:
+                sig = call_signature(entry.tool, entry.arguments)
+                if sig not in readable:
+                    readable[sig] = (entry.tool, _compact_args(entry.arguments), 0)
+
+        lines = ["# Calls you have already made", ""]
+        repeated: list[str] = []
+        for sig, count in sorted(state.call_counts.items(), key=lambda kv: -kv[1]):
+            tool, args, _ = readable.get(sig, (None, None, 0))
+            if tool is None:
+                # Compaction dropped the arguments, so the readable form is
+                # gone. Still worth reporting the count -- "something was
+                # called 16 times" is better than silence.
+                label = "an earlier call (arguments compacted away)"
+            else:
+                label = f"{tool}({args})"
+            suffix = f" x{count}" if count > 1 else ""
+            lines.append(f"- {label}{suffix}")
+            if count > 1:
+                repeated.append(f"{label} x{count}")
+
+        lines.append("")
+        if repeated:
+            lines.append(
+                "REPEATED (you are going in circles — these results cannot have "
+                "changed since you already have them): " + "; ".join(repeated[:6])
+            )
+            lines.append(
+                "Do not make any of these calls again. Use what you already "
+                "have, or make a different call."
+            )
+        else:
+            lines.append("Do not repeat a call whose result you already have.")
+        return "\n".join(lines)
+
     def _render_log(self, state: AgentState, *, chars: int) -> str:
         """Two tiers, and the cheap one comes first.
 
@@ -153,11 +194,20 @@ class ContextBuilder:
         header = "# Progress so far\n"
         budget = max(1_000, chars - len(header))
         keep = self.settings.agent.keep_recent_observations
+        pointers = self._repeat_pointers(state)
 
         chunks: list[str] = []
         remaining = budget
         for i, entry in enumerate(reversed(state.log)):
-            if i < keep:
+            idx = len(state.log) - 1 - i
+            if idx in pointers:
+                earlier = state.log[pointers[idx]]
+                rendered = (
+                    f"[{entry.index}] {entry.tool}({_compact_args(entry.arguments)}) -> "
+                    f"ok, identical to entry [{earlier.index}] "
+                    f"({len(entry.text or '')} chars not repeated)"
+                )
+            elif i < keep:
                 rendered = entry.render(max_chars=max(400, int(budget * 0.7)))
             else:
                 rendered = entry.digest()
@@ -170,6 +220,35 @@ class ContextBuilder:
                 chunks.append(f"[... {omitted} earlier entries omitted from context]")
                 break
         return header + "\n\n" + "\n\n".join(reversed(chunks))
+
+    def _repeat_pointers(self, state: AgentState) -> dict[int, int]:
+        """Indices of entries whose body is already in the prompt.
+
+        A repeat that returned *exactly* what the first call returned carries
+        no information, so shipping the body again buys nothing and costs the
+        full file. The durable log keeps both copies -- this only affects what
+        the model is shown, so `task show`, `task rewind` and the audit trail
+        are untouched.
+
+        The digest is what makes it safe: if the file changed between the two
+        reads the digests differ, no pointer is emitted, and the model sees the
+        new content. Suppression only ever happens when the bytes are identical.
+
+        Only successful calls qualify. A repeat of a *failure* is not
+        redundant -- the error may have changed, and that difference is the
+        signal the model is looking for.
+        """
+        first_seen: dict[tuple[str, str], int] = {}
+        pointers: dict[int, int] = {}
+        for idx, entry in enumerate(state.log):
+            if entry.kind != "tool" or not entry.tool or not entry.success:
+                continue
+            key = (call_signature(entry.tool, entry.arguments), result_digest(entry.text))
+            if key in first_seen:
+                pointers[idx] = first_seen[key]
+            else:
+                first_seen[key] = idx
+        return pointers
 
     def estimate(self, state: AgentState) -> int:
         return self.model.count_messages(self.build(state))
