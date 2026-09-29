@@ -14,9 +14,19 @@ const $ = (id) => document.getElementById(id);
 const state = {
   threadId: "console-" + Math.random().toString(36).slice(2, 8),
   taskId: null,
-  running: false,
   // Per-run render targets, reset on each RUN_STARTED.
   current: null,
+  _running: false,
+  get running() {
+    return this._running;
+  },
+  /* The send button is a property of "is a run going", not something to
+   * remember at each of the six places that change it. Binding it here means
+   * a new exit path cannot leave the button saying 发送 while a run streams. */
+  set running(value) {
+    this._running = value;
+    setSendMode(value);
+  },
 };
 
 /* The desktop launcher hands us a per-launch session token in the URL
@@ -104,24 +114,28 @@ function clearTranscript() {
   $("empty")?.classList.remove("hidden");
 }
 
-function setStatus(text, busy = false) {
+/* `state` is a key, not a label.
+ *
+ * The colour and the logic key off it, and the label is looked up separately.
+ * Passing the display string here is how a translated interface loses all its
+ * status colours: `[data-state="completed"]` stops matching the moment the
+ * text becomes "已完成".
+ */
+function setStatus(state, busy = false) {
   const node = $("status");
-  node.textContent = text;
+  setText(node, STATUS_LABEL[state] || state);
+  node.dataset.state = state;
   node.classList.toggle("busy", busy);
-  // Also exposed as a data attribute so the colour can follow the state
-  // rather than the wording -- "waiting_confirmation" should look like a
-  // warning, and it should keep looking like one if the label is reworded.
-  node.dataset.state = String(text || "idle");
 
   // The header chip tracks the live state too. Otherwise it only moves when
-  // the task list polls, so the header could say "running" for five seconds
+  // the task list polls, so the header could say "运行中" for five seconds
   // after the run had already stopped -- and the two status lines on screen
   // would disagree.
   const chip = $("topbar-status");
   if (chip) {
-    chip.className = `chip ${STATUS_TONE[text] || ""}`.trim();
-    chip.textContent = STATUS_LABEL[text] || text;
-    chip.title = text;
+    setClass(chip, `chip ${STATUS_TONE[state] || ""}`.trim());
+    setText(chip, STATUS_LABEL[state] || state);
+    setTitle(chip, state);
   }
 }
 
@@ -172,8 +186,17 @@ const STATUS_TONE = {
 // Short label, full value in the tooltip. `waiting_confirmation` is a wire
 // value; as a UI label it is both long and jargon, and it wrapped the row.
 const STATUS_LABEL = {
-  waiting_confirmation: "waiting",
-  completed: "done",
+  pending: "排队中",
+  planning: "规划中",
+  running: "运行中",
+  waiting: "等待批准",
+  waiting_confirmation: "等待批准",
+  cancelling: "正在取消",
+  resyncing: "重新同步",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  idle: "空闲",
 };
 
 const taskNodes = new Map();
@@ -227,7 +250,7 @@ function paintTask(node, task) {
   setClass(node.chip, `chip ${STATUS_TONE[task.status] || ""}`.trim());
   setText(node.chip, STATUS_LABEL[task.status] || task.status);
   setTitle(node.chip, task.status);
-  setText(node.stats, `${task.steps_used} steps · ${task.tokens_in + task.tokens_out} tok`);
+  setText(node.stats, `${task.steps_used} 步 · ${task.tokens_in + task.tokens_out} token`);
   node.item.classList.toggle("active", task.id === state.taskId);
 }
 
@@ -236,17 +259,17 @@ function paintTask(node, task) {
  * anchor it -- and no way to tell at a glance whether the thing on screen was
  * still running. */
 function renderTopbar(task) {
-  setText($("topbar-title"), task ? task.id : "console");
+  setText($("topbar-title"), task ? task.id : "控制台");
   setTitle($("topbar-title"), task ? task.goal : "");
 
   const chip = $("topbar-status");
   setClass(chip, `chip ${STATUS_TONE[task?.status] || ""}`.trim());
-  setText(chip, task ? STATUS_LABEL[task.status] || task.status : "idle");
+  setText(chip, task ? STATUS_LABEL[task.status] || task.status : STATUS_LABEL.idle);
   setTitle(chip, task?.status || "");
 
   const meta = $("topbar-meta");
   const wanted = task
-    ? `${task.steps_used} steps · ${task.tokens_in + task.tokens_out} tok`
+    ? `${task.steps_used} 步 · ${task.tokens_in + task.tokens_out} token`
     : "";
   if (meta.textContent !== wanted) meta.textContent = wanted;
 }
@@ -258,7 +281,7 @@ async function refreshTasks() {
 
     if (!tasks.length) {
       taskNodes.clear();
-      list.replaceChildren(el("div", "task-empty", "Nothing yet."));
+      list.replaceChildren(el("div", "task-empty", "还没有任务。"));
       $("task-count").textContent = "";
       return;
     }
@@ -358,7 +381,7 @@ function renderEvent(event) {
   const run = state.current;
   switch (event.type) {
     case "RUN_STARTED":
-      run.assistant = addTurn("assistant", "agent");
+      run.assistant = addTurn("assistant", "Agent");
       setStatus("running", true);
       break;
 
@@ -431,7 +454,7 @@ function renderEvent(event) {
       if (event.activityType !== "PLAN") break;
       if (!run.plan) {
         const wrapper = el("section", "plan-card");
-        wrapper.append(el("div", "plan-label", "plan"));
+        wrapper.append(el("div", "plan-label", "计划"));
         run.plan = el("div", "plan");
         wrapper.append(run.plan);
         run.assistant.append(wrapper);
@@ -456,7 +479,7 @@ function renderEvent(event) {
       if (outcome.type === "interrupt") {
         run.interrupted = true;
         showApproval(outcome.interrupts[0]);
-        setStatus("waiting for approval", false);
+        setStatus("waiting", false);
       } else {
         setStatus("idle", false);
         state.running = false;
@@ -466,7 +489,7 @@ function renderEvent(event) {
     }
 
     case "RUN_ERROR":
-      addTurn("error", "error").append(el("div", "body", event.message || "unknown error"));
+      addTurn("error", "错误").append(el("div", "body", event.message || "未知错误"));
       setStatus("failed", false);
       state.running = false;
       $("btn-cancel").disabled = true;
@@ -500,26 +523,26 @@ function renderCustom(event) {
     }
   }
   if (event.name === "context_compacted" && run.assistant) {
-    run.assistant.append(el("div", "dim", "context compacted — older steps summarised"));
+    run.assistant.append(el("div", "dim", "上下文已压缩，早期步骤已摘要"));
   }
   if (event.name === "tool_ambiguous" && run.assistant) {
     const warn = el("div", "tool");
-    warn.append(el("div", "tool-head", "outcome unknown"));
+    warn.append(el("div", "tool-head", "结果未知"));
     warn.append(
       el(
         "div",
         "dim",
-        `${event.value.tool} was interrupted mid-flight. It may or may not have run — ` +
-          "check the current state before continuing."
+        `\`${event.value.tool}\` 在中断时正在执行，无法确定它是否已经跑过。` +
+          "继续之前请先确认当前状态。"
       )
     );
     run.assistant.append(warn);
   }
   if (event.name === "stream_idle") {
-    setStatus("waiting…", true);
+    setStatus("waiting", true);
   }
   if (event.name === "stream_notice") {
-    setStatus("stream fell behind — re-syncing", true);
+    setStatus("resyncing", true);
   }
 }
 
@@ -544,7 +567,7 @@ async function decide(verb) {
   const run = newRun();
   state.current = run;
   run.assistant = addTurn("assistant", "agent");
-  setStatus(`${verb}…`, true);
+  setStatus(verb === "approve" ? "running" : "idle", true);
   try {
     await json(`/api/v1/tasks/${state.taskId}/${verb}`, { method: "POST" });
     await attach(state.taskId);
@@ -641,7 +664,7 @@ async function send(goal) {
   hideApproval();
   $("btn-cancel").disabled = false;
 
-  addTurn("user", "you").append(el("div", "body", goal));
+  addTurn("user", "你").append(el("div", "body", goal));
   state.current = newRun();
 
   const approve = approvedEffects();
@@ -682,10 +705,10 @@ async function cancel() {
       $("btn-cancel").disabled = true;
       setStatus(result.status || "cancelled", false);
     } else {
-      setStatus("cancelling…", true);
+      setStatus("cancelling", true);
     }
   } catch (error) {
-    setStatus(`cancel failed: ${error}`, false);
+    setStatus("failed", false);
   }
 }
 
@@ -702,22 +725,22 @@ function renderSandbox(sandbox) {
   const box = $("sandbox");
   box.replaceChildren();
   const isolated = sandbox.backend && sandbox.backend !== "none";
-  box.append(sandboxRow("Backend", sandbox.backend || "none", isolated ? "chip-ok" : "chip-warn"));
-  box.append(sandboxRow("Isolation", sandbox.isolation || "none"));
+  box.append(sandboxRow("后端", sandbox.backend || "none", isolated ? "chip-ok" : "chip-warn"));
+  box.append(sandboxRow("隔离", sandbox.isolation || "none"));
 
   const notes = sandbox.notes || [];
   if (!isolated) {
     // The one-line version of the caveat. It is the thing a user needs to
     // know, and it has to be visible without expanding anything.
     box.append(
-      el("div", "sandbox-alert", "Commands run without OS isolation. The path fence and command guard still apply."),
+      el("div", "sandbox-alert", "命令在无操作系统隔离下运行。路径围栏与命令守卫仍然生效。"),
     );
   }
   if (notes.length) {
     // Collapsed: these are three paragraphs of explanation, and a sidebar is
     // not the place to read them. Available, not in the way.
     const details = el("details", "sandbox-why");
-    details.append(el("summary", "", `why? (${notes.length})`));
+    details.append(el("summary", "", `为什么？(${notes.length})`));
     const list = el("ul");
     for (const note of notes) list.append(el("li", "", note));
     details.append(list);
@@ -734,13 +757,13 @@ async function boot() {
     if (health.default_model) $("model").value = health.default_model;
     if (health.token_required && !TOKEN) {
       // Say it here rather than letting every action fail with a 403.
-      addTurn("error", "error").append(
+      addTurn("error", "错误").append(
         el(
           "div",
           "body",
-          "This server requires a session token and this page does not have one.\n" +
-            "Launch it with `uaa desktop` (the token is passed to the window), or " +
-            "open the URL printed by `uaa serve --token`."
+          "这个服务需要会话令牌，而当前页面没有。\n" +
+            "用 `uaa desktop` 启动（令牌会传给窗口），或打开 " +
+            "`uaa serve --token` 打印出来的那个地址。"
         )
       );
     }
@@ -749,7 +772,7 @@ async function boot() {
   try {
     renderSandbox(await json("/api/v1/sandbox"));
   } catch {
-    $("sandbox").replaceChildren(el("div", "sandbox-val", "unavailable"));
+    $("sandbox").replaceChildren(el("div", "sandbox-val", "不可用"));
   }
 
   await refreshTasks();
@@ -774,20 +797,61 @@ $("composer").addEventListener("submit", (event) => {
   send(goal);
 });
 
-$("goal").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    $("composer").requestSubmit();
-  }
+/* ------------------------------------------------------------------ composer */
+
+/* Whether an input method is mid-composition.
+ *
+ * This matters more for Chinese than for English: typing 你好 means typing
+ * `nihao` and pressing Enter to pick a candidate. Without this check that
+ * Enter submits the form, and the agent starts on a half-typed sentence. Both
+ * the flag and `event.isComposing` are consulted, because some browsers fire
+ * `keydown` before `compositionend` and others after. */
+let composing = false;
+
+$("goal").addEventListener("compositionstart", () => {
+  composing = true;
+});
+$("goal").addEventListener("compositionend", () => {
+  composing = false;
 });
 
-/* Grow with the text instead of scrolling inside two rows. A goal worth
-   typing is usually longer than one line. */
+$("goal").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey) return;
+  if (event.isComposing || composing) return;
+  event.preventDefault();
+  $("composer").requestSubmit();
+});
+
+/* Grow with the text. `field-sizing: content` does this natively where it is
+ * supported, so the script only fills in where it is not -- otherwise the two
+ * fight over the height. */
+const nativeSizing =
+  typeof CSS !== "undefined" && CSS.supports && CSS.supports("field-sizing", "content");
+
 $("goal").addEventListener("input", () => {
+  if (nativeSizing) return;
   const box = $("goal");
   box.style.height = "auto";
-  box.style.height = `${Math.min(box.scrollHeight, 200)}px`;
+  box.style.height = `${Math.min(box.scrollHeight, 220)}px`;
 });
+
+/* One button, two jobs: while a run is going, the thing you want is to stop
+ * it, and hunting for a separate control to do that is how people end up
+ * closing the tab instead. */
+function setSendMode(running) {
+  const button = $("btn-send");
+  if (running) {
+    button.type = "button";
+    button.textContent = "停止";
+    button.className = "btn btn-danger";
+    button.onclick = () => cancel();
+  } else {
+    button.type = "submit";
+    button.textContent = "发送";
+    button.className = "btn btn-primary";
+    button.onclick = null;
+  }
+}
 
 for (const button of document.querySelectorAll(".example")) {
   button.onclick = () => {

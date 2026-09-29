@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>unified-ai-agent</title>
+<title>unified-ai-agent 控制台</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -26,20 +26,20 @@
     </header>
 
     <section class="panel">
-      <h2 class="panel-title">Run</h2>
+      <h2 class="panel-title">运行</h2>
       <label class="field">
-        <span class="field-label">Model</span>
+        <span class="field-label">模型</span>
         <input id="model" value="mock" spellcheck="false" autocomplete="off">
       </label>
       <div class="field">
-        <span class="field-label">Pre-approve effects</span>
-        <div id="approve" class="toggles" role="group" aria-label="Pre-approve effects"></div>
-        <p class="hint">Approved effects run without asking. <code>system_admin</code> can never be granted here.</p>
+        <span class="field-label">预授权效果</span>
+        <div id="approve" class="toggles" role="group" aria-label="预授权效果"></div>
+        <p class="hint">已授权的效果不再逐次询问。<code>system_admin</code> 无法在此授权。</p>
       </div>
     </section>
 
     <section class="panel">
-      <h2 class="panel-title">Sandbox</h2>
+      <h2 class="panel-title">沙箱</h2>
       <div id="sandbox" class="sandbox">
         <span class="skeleton"></span>
       </div>
@@ -47,24 +47,24 @@
 
     <section class="panel panel-grow">
       <h2 class="panel-title">
-        Tasks
+        任务
         <span class="panel-count" id="task-count"></span>
       </h2>
       <div id="tasks" class="task-list"></div>
     </section>
 
     <footer class="sidebar-footer">
-      <a href="/docs" target="_blank" rel="noreferrer">API docs</a>
-      <a href="/api/v1/tools" target="_blank" rel="noreferrer">tools</a>
-      <a href="/api/v1/skills" target="_blank" rel="noreferrer">skills</a>
+      <a href="/docs" target="_blank" rel="noreferrer">接口文档</a>
+      <a href="/api/v1/tools" target="_blank" rel="noreferrer">工具</a>
+      <a href="/api/v1/skills" target="_blank" rel="noreferrer">技能</a>
     </footer>
   </aside>
 
   <main id="main">
     <header id="topbar">
       <div class="topbar-left">
-        <span class="topbar-title" id="topbar-title">Console</span>
-        <span class="chip" id="topbar-status">idle</span>
+        <span class="topbar-title" id="topbar-title">控制台</span>
+        <span class="chip" id="topbar-status">空闲</span>
       </div>
       <div class="topbar-right" id="topbar-meta"></div>
     </header>
@@ -78,14 +78,14 @@
             <path d="M8.5 13.5 11 16l4.5-5"/>
           </svg>
         </div>
-        <h2 class="empty-title">What should the agent do?</h2>
+        <h2 class="empty-title">让 Agent 做什么？</h2>
         <p class="empty-body">
-          It plans first, then asks before anything that writes, runs or reaches
-          the network.
+          它会先规划，然后才开始动手。任何写入、执行命令或联网的操作，都会先停下来问你。
         </p>
         <div class="empty-examples">
           <button type="button" class="example">运行测试，找出失败原因并修复</button>
           <button type="button" class="example">总结这个项目的结构</button>
+          <button type="button" class="example">审查最近的改动有没有问题</button>
         </div>
       </div>
     </div>
@@ -98,25 +98,25 @@
             <path d="M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z"/>
           </svg>
         </span>
-        <strong id="approval-title">Approval required</strong>
+        <strong id="approval-title">需要你批准</strong>
         <span id="approval-effect" class="chip chip-warn"></span>
       </div>
       <pre id="approval-preview"></pre>
       <div id="approval-detail" class="approval-detail"></div>
       <div class="approval-actions">
-        <button id="btn-approve" class="btn btn-primary">Approve</button>
-        <button id="btn-deny" class="btn btn-danger">Refuse</button>
+        <button id="btn-approve" class="btn btn-primary">批准</button>
+        <button id="btn-deny" class="btn btn-danger">拒绝</button>
       </div>
     </div>
 
     <form id="composer">
       <div class="composer-box">
-        <textarea id="goal" rows="1" placeholder="Describe a task…" aria-label="Task goal"></textarea>
+        <textarea id="goal" rows="1" placeholder="描述一个任务…" aria-label="任务目标"></textarea>
         <div class="composer-actions">
-          <span id="status" class="status" data-state="idle">idle</span>
-          <span class="composer-hint">Enter to send · Shift+Enter for a newline</span>
-          <button id="btn-cancel" type="button" class="btn btn-ghost" disabled>Cancel</button>
-          <button id="btn-send" type="submit" class="btn btn-primary">Send</button>
+          <span id="status" class="status" data-state="idle">空闲</span>
+          <span class="composer-hint">Enter 发送 · Shift+Enter 换行</span>
+          <button id="btn-cancel" type="button" class="btn btn-ghost" disabled>取消</button>
+          <button id="btn-send" type="submit" class="btn btn-primary">发送</button>
         </div>
       </div>
     </form>

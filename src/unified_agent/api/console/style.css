@@ -26,10 +26,21 @@
   --bg-panel: #101218;
   --bg-raised: #16191f;
   --bg-hover: #1c2029;
-  --bg-input: #0d0f14;
+  /* Recessed, not raised. On a dark UI "input" reads as a well you type into,
+     and a well is darker than the surface around it -- the same direction as
+     light, not the opposite. Getting this backwards is why a form looks
+     pasted on. */
+  --bg-input: #0b0d12;
 
-  --border: #212530;
-  --border-strong: #2c313d;
+  /* Three tiers, because one border cannot do two jobs.
+     `--border` separates things that are already distinct (decorative).
+     `--border-strong` is for hover and dividers.
+     `--border-control` outlines something you have to be able to find and
+     click: at 3.16:1 on the panel it meets WCAG 1.4.11, where the decorative
+     tier sits at 1.45:1 and would fail it. */
+  --border: #1e222b;
+  --border-strong: #2b303c;
+  --border-control: #5a6377;
 
   --text: #e9ebef;
   --text-dim: #9aa1b0;
@@ -54,9 +65,18 @@
      line up on this, which is what makes the page look like one thing */
   --column: 780px;
 
+  /* Latin first, then the Chinese family -- but the Chinese family is not a
+     fallback here, it is what most of the text will actually render in.
+     `PingFang SC` is the macOS default and is what makes a Chinese interface
+     look native rather than like a translated English one; the rest are the
+     Windows and Linux equivalents. HarmonyOS Sans is first because it has the
+     most even weight across the CJK block. */
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", Roboto, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    "HarmonyOS Sans SC", "Hiragino Sans GB", "Microsoft YaHei UI",
+    "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", Roboto,
+    sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "PingFang SC", monospace;
 }
 
 * { box-sizing: border-box; }
@@ -66,7 +86,9 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font: 400 14px/1.55 var(--sans);
+  /* 1.7 rather than 1.55: hanzi fill their em box, so the same leading that
+     looks right for Latin looks cramped for Chinese. */
+  font: 400 14px/1.7 var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -132,11 +154,13 @@ html, body {
   align-items: center;
   justify-content: space-between;
   margin: 0;
-  font-size: 10.5px;
+  /* No letter-spacing and no uppercase: both are Latin devices. Tracking
+     pushes hanzi apart, which reads as broken spacing rather than as
+     emphasis, and `text-transform` does nothing to Chinese at all. Weight and
+     colour carry the hierarchy instead. */
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--text-dim);
 }
 
 .panel-count { font-family: var(--mono); font-size: 11px; letter-spacing: 0; }
@@ -148,7 +172,7 @@ html, body {
 input[type="text"], #model, textarea {
   width: 100%;
   padding: 8px 11px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border-control);
   border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text);
@@ -475,10 +499,8 @@ input:focus, textarea:focus {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
   color: var(--text-faint);
 }
 
@@ -595,11 +617,9 @@ input:focus, textarea:focus {
 }
 
 .plan-label {
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--text-dim);
 }
 
 .plan { display: flex; flex-direction: column; gap: 1px; }
@@ -722,7 +742,7 @@ input:focus, textarea:focus {
 }
 
 .composer-box {
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border-control);
   border-radius: var(--radius-lg);
   background: var(--bg-panel);
   transition: border-color 0.12s, box-shadow 0.12s;
@@ -748,6 +768,13 @@ input:focus, textarea:focus {
 }
 
 #goal:focus { box-shadow: none; border: none; }
+
+/* Let the browser size the textarea to its content where it can. The script
+ * falls back to measuring `scrollHeight`, and skips itself when this applies
+ * so the two do not fight over the height. */
+@supports (field-sizing: content) {
+  #goal { field-sizing: content; }
+}
 
 .composer-actions {
   display: flex;
@@ -816,7 +843,7 @@ input:focus, textarea:focus {
 
 .btn-ghost {
   background: transparent;
-  border-color: var(--border-strong);
+  border-color: var(--border-control);
   color: var(--text-dim);
 }
 .btn-ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
