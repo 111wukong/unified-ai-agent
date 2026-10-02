@@ -104,6 +104,33 @@ class TestSessionTurns:
         assert [t["goal"] for t in store.session_turns(a)] == ["A 的问题"]
         assert [t["goal"] for t in store.session_turns(b)] == ["B 的问题"]
 
+
+class TestTaskListCarriesTheParentLink:
+    """The console draws a fan-out as a tree, and it can only do that if the
+    list says who spawned whom. A sub-agent shown as a peer of its parent
+    makes "fan out to five" read as six unrelated runs."""
+
+    def test_list_tasks_reports_the_parent(self, store: Store) -> None:
+        sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
+        parent = store.create_task(session_id=sid, goal="扇出")
+        child = store.create_task(session_id=sid, goal="子任务", parent_task_id=parent)
+
+        rows = {row["id"]: row for row in store.list_tasks(session_id=sid)}
+
+        assert rows[child]["parent_task_id"] == parent
+        assert rows[parent]["parent_task_id"] is None
+
+    def test_list_children_returns_them_oldest_first(self, store: Store) -> None:
+        """Oldest first so a fan-out reads in the order it was dispatched."""
+        sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
+        parent = store.create_task(session_id=sid, goal="扇出")
+        kids = [
+            store.create_task(session_id=sid, goal=f"子 {i}", parent_task_id=parent)
+            for i in range(3)
+        ]
+
+        assert [c["id"] for c in store.list_children(parent)] == kids
+
     def test_appending_updates_the_projection_cursor(self, store: Store) -> None:
         sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
         task = store.create_task(session_id=sid, goal="g")

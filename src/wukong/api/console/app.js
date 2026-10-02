@@ -383,9 +383,47 @@ const STATUS_LABEL = {
 
 const taskNodes = new Map();
 
-function taskRow(task) {
-  const item = el("div", "task-item");
+/* Parents before their children, children indented.
+ *
+ * A fan-out run creates one task per sub-agent. The list used to show them as
+ * peers of the task that spawned them, so "fan out to five" read as six
+ * unrelated runs -- and the sub-agent that failed was indistinguishable from
+ * the one that called it. The relationship was already in the data
+ * (`parent_task_id`); nothing was reading it.
+ *
+ * Returns a flat list with a depth, rather than a nested structure, because
+ * the renderer already rebuilds the list in one pass and a tree of DOM nodes
+ * would only add a second shape to keep in sync. */
+function flattenTasks(tasks) {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const kids = new Map();
+  const roots = [];
+
+  for (const task of tasks) {
+    const parent = task.parent_task_id;
+    // A parent outside this page (older than the limit) is not a parent here.
+    // Showing the child at the top level beats dropping it off the list.
+    if (parent && byId.has(parent)) {
+      if (!kids.has(parent)) kids.set(parent, []);
+      kids.get(parent).push(task);
+    } else {
+      roots.push(task);
+    }
+  }
+
+  const out = [];
+  const walk = (task, depth) => {
+    out.push({ task, depth });
+    for (const child of kids.get(task.id) || []) walk(child, depth + 1);
+  };
+  for (const root of roots) walk(root, 0);
+  return out;
+}
+
+function taskRow(task, depth = 0) {
+  const item = el("div", `task-item depth-${Math.min(depth, 3)}`);
   const goal = el("div", "task-goal");
+  if (depth > 0) goal.append(el("span", "task-child-mark", "↳ "));
   const meta = el("div", "task-meta");
   const chip = el("span", "chip");
   const stats = el("span", "task-stats");
@@ -526,7 +564,8 @@ async function refreshTasks() {
       return;
     }
 
-    const ids = tasks.map((task) => task.id).join();
+    const ordered = flattenTasks(tasks);
+    const ids = ordered.map((entry) => entry.task.id).join();
     if (ids !== [...taskNodes.keys()].join()) {
       // The *set* changed, so rebuild. Doing this on every poll -- which is
       // what it used to do -- destroys the element under the pointer every
@@ -534,8 +573,8 @@ async function refreshTasks() {
       // already gone.
       const next = new Map();
       list.replaceChildren();
-      for (const task of tasks) {
-        const node = taskNodes.get(task.id) || taskRow(task);
+      for (const { task, depth } of ordered) {
+        const node = taskNodes.get(task.id) || taskRow(task, depth);
         paintTask(node, task);
         list.append(node.item);
         next.set(task.id, node);
@@ -543,7 +582,7 @@ async function refreshTasks() {
       taskNodes.clear();
       for (const [id, node] of next) taskNodes.set(id, node);
     } else {
-      for (const task of tasks) paintTask(taskNodes.get(task.id), task);
+      for (const { task } of ordered) paintTask(taskNodes.get(task.id), task);
     }
 
     $("task-count").textContent = String(tasks.length);

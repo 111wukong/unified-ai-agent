@@ -425,6 +425,26 @@ input:focus, textarea:focus {
 
 .task-item:hover { background: var(--bg-raised); }
 
+/* Sub-agents hang under the task that spawned them. The indentation is the
+   whole signal: a fan-out of five has to read as one run with five parts, not
+   as six runs that happen to be near each other. */
+.task-item.depth-1 { margin-left: 15px; }
+.task-item.depth-2 { margin-left: 27px; }
+.task-item.depth-3 { margin-left: 36px; }
+
+.task-child-mark { color: var(--text-faint); }
+
+/* A sub-agent is a detail of its parent, so it is quieter -- but its status
+   rail stays, because "which one failed" is exactly what you scan a fan-out
+   for. */
+.task-item.depth-1 .task-goal,
+.task-item.depth-2 .task-goal,
+.task-item.depth-3 .task-goal {
+  font-size: 11.5px;
+  -webkit-line-clamp: 1;
+  color: var(--text-dim);
+}
+
 .task-item.active {
   background: var(--accent-soft);
   border-color: rgba(91, 124, 250, 0.32);
