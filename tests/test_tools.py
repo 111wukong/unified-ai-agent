@@ -415,3 +415,64 @@ class TestProjectIsImportableDuringTests:
         assert "1 passed" in result.output
 
 
+class TestWritePreviewsShowTheChange:
+    """An approval prompt for a write has to show *what changes*.
+
+    The default preview dumps the arguments, which for `write_file` means the
+    entire file body -- so approving a one-line edit means finding that edit
+    inside three hundred lines of text that are not changing. The reviewer's
+    real question is "what will be different", and that is a diff.
+    """
+
+    @staticmethod
+    def _ctx(workspace: Path) -> ToolContext:
+        return ToolContext(
+            task_id="t",
+            session_id="s",
+            step_id="step_1",
+            workspace=workspace,
+            home=workspace,
+            artifact_dir=workspace,
+        )
+
+    def test_an_edit_reads_as_a_diff(self, workspace: Path) -> None:
+        (workspace / "app.py").write_text("a\nb\nc\n", encoding="utf-8")
+
+        preview = WriteFileTool().preview(
+            {"path": "app.py", "content": "a\nB\nc\n"}, self._ctx(workspace)
+        )
+
+        assert "-b" in preview.splitlines()
+        assert "+B" in preview.splitlines()
+
+    def test_a_new_file_says_so_rather_than_diffing_nothing(self, workspace: Path) -> None:
+        preview = WriteFileTool().preview(
+            {"path": "brand-new.md", "content": "hello\n"}, self._ctx(workspace)
+        )
+
+        assert "create" in preview
+        assert "brand-new.md" in preview
+
+    def test_a_patch_is_previewed_without_touching_disk(self, workspace: Path) -> None:
+        target = workspace / "app.py"
+        target.write_text("a\nb\nc\n", encoding="utf-8")
+
+        preview = ApplyPatchTool().preview(
+            {"path": "app.py", "edits": [{"old": "b", "new": "B"}]}, self._ctx(workspace)
+        )
+
+        assert "+B" in preview.splitlines()
+        # A preview that can write is not a preview.
+        assert target.read_text(encoding="utf-8") == "a\nb\nc\n"
+
+    def test_a_patch_that_would_not_apply_says_so(self, workspace: Path) -> None:
+        (workspace / "app.py").write_text("a\nb\n", encoding="utf-8")
+
+        preview = ApplyPatchTool().preview(
+            {"path": "app.py", "edits": [{"old": "not in the file", "new": "x"}]},
+            self._ctx(workspace),
+        )
+
+        assert "nothing would change" in preview
+
+

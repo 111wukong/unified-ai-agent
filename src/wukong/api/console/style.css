@@ -834,6 +834,21 @@ input:focus, textarea:focus {
   overflow-y: auto;
 }
 
+/* Rendered diffs. The tinted row is what makes a change findable at a glance;
+   the negative margin lets the tint run to the panel edge without shifting
+   the text out of column with the lines above it. */
+.diff-line {
+  padding: 0 6px;
+  margin: 0 -6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-add { background: var(--ok-soft); color: #7fd8ae; }
+.diff-del { background: var(--danger-soft); color: #f0a5a4; }
+.diff-hunk { color: var(--accent-hover); }
+.diff-meta { color: var(--text-faint); font-weight: 600; }
+
 .approval-detail {
   padding: 0 15px 13px;
   font-size: 12.5px;

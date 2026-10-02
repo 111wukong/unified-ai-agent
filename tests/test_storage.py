@@ -39,6 +39,71 @@ class TestEventLog:
         # TASK_CREATED is seq 1, so the five appends are seqs 2..6.
         assert [e.seq for e in store.events(task, since_seq=3)] == [4, 5, 6]
 
+
+class TestSessionTurns:
+    """A session is a conversation, not a list of unrelated runs.
+
+    Without this the follow-up request in a thread has no idea what was
+    already asked, so "expand on the second point" has no referent.
+    """
+
+    @staticmethod
+    def _finish(store: Store, task_id: str, answer: str) -> None:
+        store.save_projection(
+            task_id,
+            status="completed",
+            state={},
+            steps_used=1,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=0.0,
+            result={"answer": answer},
+        )
+
+    def test_a_thread_comes_back_oldest_first(self, store: Store) -> None:
+        sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
+        first = store.create_task(session_id=sid, goal="第一个问题")
+        second = store.create_task(session_id=sid, goal="第二个问题")
+        self._finish(store, first, "第一个答案")
+        self._finish(store, second, "第二个答案")
+
+        turns = store.session_turns(sid)
+
+        # Oldest first: a conversation reads forwards, and the model needs the
+        # order to make sense of "the second point".
+        assert [t["goal"] for t in turns] == ["第一个问题", "第二个问题"]
+        assert [t["answer"] for t in turns] == ["第一个答案", "第二个答案"]
+
+    def test_an_unanswered_task_is_left_out(self, store: Store) -> None:
+        """A question with no answer reads as a debt the model still owes."""
+        sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
+        answered = store.create_task(session_id=sid, goal="答过的")
+        failed = store.create_task(session_id=sid, goal="失败的")
+        self._finish(store, answered, "答案")
+        store.save_projection(
+            failed,
+            status="failed",
+            state={},
+            steps_used=1,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=0.0,
+            error="boom",
+        )
+
+        assert [t["goal"] for t in store.session_turns(sid)] == ["答过的"]
+
+    def test_another_session_is_a_different_conversation(self, store: Store) -> None:
+        a = store.create_session(name="a", working_dir="/tmp", model_alias="mock")
+        b = store.create_session(name="b", working_dir="/tmp", model_alias="mock")
+        task_a = store.create_task(session_id=a, goal="A 的问题")
+        task_b = store.create_task(session_id=b, goal="B 的问题")
+        self._finish(store, task_a, "A 的答案")
+        self._finish(store, task_b, "B 的答案")
+
+        assert [t["goal"] for t in store.session_turns(a)] == ["A 的问题"]
+        assert [t["goal"] for t in store.session_turns(b)] == ["B 的问题"]
+
     def test_appending_updates_the_projection_cursor(self, store: Store) -> None:
         sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
         task = store.create_task(session_id=sid, goal="g")

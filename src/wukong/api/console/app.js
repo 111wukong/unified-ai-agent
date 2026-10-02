@@ -754,10 +754,40 @@ function renderCustom(event) {
 
 /* ---------------------------------------------------------------- approval */
 
+/* Colour a unified diff so the eye lands on the changed lines.
+ *
+ * The +/- prefixes are the only thing separating a diff from prose, and
+ * uncoloured on a dark background they are nearly invisible -- which loses the
+ * entire point of showing a diff instead of the payload, because the reader
+ * still has to hunt for the change.
+ *
+ * Colourising is conditional. A wall of one colour is not a diff, so text that
+ * does not look like one (a command, a JSON payload) keeps the plain treatment
+ * the panel already gave it. */
+function renderPreview(node, text) {
+  node.replaceChildren();
+  const lines = String(text).split("\n");
+  const looksLikeDiff =
+    lines.some((line) => line.startsWith("+++") || line.startsWith("---")) &&
+    lines.some((line) => /^[+-][^+-]/.test(line));
+  if (!looksLikeDiff) {
+    node.textContent = text;
+    return;
+  }
+  for (const line of lines) {
+    let cls = "diff-line";
+    if (/^(\+\+\+|---)/.test(line)) cls += " diff-meta";
+    else if (line.startsWith("@@")) cls += " diff-hunk";
+    else if (line.startsWith("+")) cls += " diff-add";
+    else if (line.startsWith("-")) cls += " diff-del";
+    node.append(el("div", cls, line));
+  }
+}
+
 function showApproval(interrupt) {
   if (!interrupt) return;
   $("approval-effect").textContent = interrupt.effect || "";
-  $("approval-preview").textContent = interrupt.preview || "";
+  renderPreview($("approval-preview"), interrupt.preview || "");
   $("approval-detail").textContent = interrupt.detail || "";
   $("approval").classList.remove("hidden");
   $("approval").dataset.requestId = interrupt.id || "";

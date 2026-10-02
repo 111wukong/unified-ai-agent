@@ -195,6 +195,7 @@ class AgentRuntime:
         task_id: str | None = None,
         parent_task_id: str | None = None,
         reflect: bool | None = None,
+        prior_context: str = "",
     ) -> AgentResult:
         """`task_id` lets a caller subscribe to the event stream *before* the
         task exists. Without it the SSE endpoint races the first events.
@@ -235,6 +236,7 @@ class AgentRuntime:
             started_at=budgets["started_at"],
             deadline=budgets["deadline"],
             approved_effects=effects,
+            prior_context=prior_context,
         )
         self._context = ContextBuilder(
             settings=self.settings,
@@ -1002,7 +1004,11 @@ class AgentRuntime:
     ) -> AgentResult:
         request_id = f"req_{uuid.uuid4().hex[:10]}"
         tool = self.registry.maybe_get(need.tool)
-        preview = tool.preview(need.arguments) if tool else f"{need.tool}({need.arguments})"
+        preview = (
+            tool.preview(need.arguments, self._tool_context(state))
+            if tool
+            else f"{need.tool}({need.arguments})"
+        )
         # Fingerprint what this call will act on, while the human is looking at
         # it. Checked again immediately before it runs -- see
         # `execution_identity` for why an approval gate creates this gap.

@@ -8,6 +8,7 @@ needs the failure text to plan around it.
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import hashlib
 import os
@@ -164,6 +165,31 @@ class ReadFileTool(Tool):
         )
 
 
+def _unified_diff(before: str, after: str, label: str, *, context: int = 3) -> str:
+    """A diff sized for an approval prompt, not for a terminal.
+
+    Truncated on purpose: a reviewer deciding whether to allow a write needs to
+    see *what changes*, and a thousand-line diff is the same problem as the
+    thousand-line payload it replaced.
+    """
+    lines = list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"a/{label}",
+            tofile=f"b/{label}",
+            lineterm="",
+            n=context,
+        )
+    )
+    if not lines:
+        return f"{label}: content is unchanged"
+    limit = 120
+    if len(lines) > limit:
+        return "\n".join(lines[:limit]) + f"\n… ({len(lines) - limit} more diff lines)"
+    return "\n".join(lines)
+
+
 class WriteFileTool(Tool):
     spec = ToolSpec(
         name="write_file",
@@ -234,6 +260,32 @@ class WriteFileTool(Tool):
             output=f"{verb} {_rel(path, ctx.workspace)} ({before} -> {after} bytes)",
             metadata={"path": str(path), "bytes": after, "existed": existed},
         )
+
+    def preview(self, args: dict[str, Any], ctx: ToolContext | None = None) -> str:
+        """Show the change, not the payload.
+
+        The default preview dumps the arguments, which for this tool means the
+        entire file body -- so approving a one-line edit means reading three
+        hundred lines and finding the edit inside them. The reviewer's actual
+        question is "what will be different", and that is a diff.
+        """
+        raw = str(args.get("path") or "?")
+        target = Path(raw)
+        if ctx is not None and not target.is_absolute():
+            target = ctx.workspace / target
+        label = _rel(target, ctx.workspace) if ctx is not None else raw
+        content = str(args.get("content") or "")
+
+        if (args.get("mode") or "overwrite") == "append":
+            return f"append to {label}\n\n+ {len(content.splitlines())} line(s)"
+
+        try:
+            before = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            before = None
+        if before is None:
+            return f"create {label}\n\n+ {len(content.splitlines())} line(s)"
+        return _unified_diff(before, content, label)
 
 
 class ApplyPatchTool(Tool):
@@ -365,6 +417,45 @@ class ApplyPatchTool(Tool):
             output=f"applied {len(args['edits'])} edit(s) to {_rel(path, ctx.workspace)}",
             metadata={"path": str(path), "edits": len(args["edits"])},
         )
+
+    def preview(self, args: dict[str, Any], ctx: ToolContext | None = None) -> str:
+        """Show each replacement as a diff, computed without touching disk.
+
+        The edits are applied to an in-memory copy rather than to the file, so
+        the preview describes the result the run *would* produce without being
+        able to produce it. A preview that could write is not a preview.
+        """
+        raw = str(args.get("path") or "?")
+        target = Path(raw)
+        if ctx is not None and not target.is_absolute():
+            target = ctx.workspace / target
+        label = _rel(target, ctx.workspace) if ctx is not None else raw
+        try:
+            original = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return f"{label}: cannot read the current file, so nothing can be previewed"
+
+        spans: list[tuple[int, int, str]] = []
+        for edit in args.get("edits") or []:
+            old = str(edit.get("old") or "")
+            new = str(edit.get("new") or "")
+            if not old:
+                continue
+            if edit.get("replace_all"):
+                start = 0
+                while (found := original.find(old, start)) != -1:
+                    spans.append((found, found + len(old), new))
+                    start = found + len(old)
+            elif (at := original.find(old)) != -1:
+                spans.append((at, at + len(old), new))
+        if not spans:
+            return f"{label}: none of the `old` strings are present, so nothing would change"
+
+        spans.sort()
+        text = original
+        for start, end, new in reversed(spans):
+            text = text[:start] + new + text[end:]
+        return _unified_diff(original, text, label)
 
 
 class ListDirectoryTool(Tool):

@@ -186,6 +186,13 @@ class AgentState(BaseModel):
     #: paid for that thirty times and got zero hits every time. `None` means
     #: "not looked yet"; `""` means "looked, found nothing".
     memory_block: str | None = None
+    #: Earlier turns of the same conversation, rendered.
+    #:
+    #: Supplied by the caller, not derived here: only the transport knows
+    #: which session this run belongs to. Empty means "this is the first
+    #: thing anyone has said", which is the right default for `run` from the
+    #: CLI -- a one-shot task has no conversation behind it.
+    prior_context: str = ""
     steps_used: int = 0
     model_calls: int = 0
     usage: TokenUsage = Field(default_factory=TokenUsage)

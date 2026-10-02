@@ -795,12 +795,44 @@ async def _agui_stream(svc: Service, payload: AgUiRunInput) -> AsyncIterator[str
         approved_effects=_grantable(payload.approve),
         max_steps=payload.max_steps,
         task_id=task_id,
+        prior_context=_prior_context(agent.store, session_id),
     )
     async for event in _agui_events(
         svc, task_id=task_id, thread_id=thread_id, run_id=run_id,
         replay=False, announce_start=True, launch=launch,
     ):
         yield agui.sse(event)
+
+
+def _prior_context(store: Any, session_id: str) -> str:
+    """Earlier turns of this conversation, rendered for the system prompt.
+
+    A session is a thread: the user asked something, got an answer, and is now
+    asking a follow-up. Every task starts from a blank state by design -- that
+    is what makes one auditable on its own -- so the thread has to be handed
+    back explicitly. Without it "expand on the second point" arrives with no
+    second point to expand on, and the model reasonably starts over.
+
+    The most recent turns are kept, not the earliest: a follow-up refers to
+    what was just said, and a long thread would otherwise push the thing being
+    followed off the top.
+    """
+    turns = store.session_turns(session_id, limit=6)
+    if not turns:
+        return ""
+    lines = ["# Earlier in this conversation", ""]
+    for i, turn in enumerate(turns, start=1):
+        lines.append(f"## 第 {i} 轮")
+        lines.append(f"用户：{turn['goal'][:600]}")
+        lines.append("")
+        lines.append(f"你：{turn['answer'][:1200]}")
+        lines.append("")
+    lines.append(
+        "The request below is a follow-up in this thread. Read it against the "
+        "turns above — do not start over, and do not redo work those answers "
+        "already cover."
+    )
+    return "\n".join(lines)
 
 
 async def _attach_stream(svc: Service, task_id: str, thread_id: str) -> AsyncIterator[str]:

@@ -315,6 +315,38 @@ class Store:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def session_turns(
+        self, session_id: str, *, limit: int = 6, exclude_task_id: str | None = None
+    ) -> list[dict[str, str]]:
+        """The answered question/answer pairs of a session, oldest first.
+
+        This is what makes a session a *conversation* rather than a list of
+        unrelated runs. Without it the next request in the same thread has no
+        idea what was already asked, so "expand on the second point" has no
+        referent and the model reasonably starts over.
+
+        Only tasks that produced an answer are included. A failed or cancelled
+        task would contribute a question with no answer, which is worse than
+        silence: the model reads an unanswered question as something it still
+        owes the user, and opens the new run trying to settle old business.
+        """
+        rows = self.conn.execute(
+            "SELECT id, goal, result FROM tasks "
+            "WHERE session_id=? AND id IS NOT ? AND status='completed' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (session_id, exclude_task_id, limit),
+        ).fetchall()
+        turns: list[dict[str, str]] = []
+        for row in reversed(rows):  # oldest first, so the thread reads forwards
+            try:
+                answer = (json.loads(row["result"] or "{}") or {}).get("answer") or ""
+            except (TypeError, ValueError):
+                answer = ""
+            if not answer.strip():
+                continue
+            turns.append({"goal": row["goal"], "answer": answer})
+        return turns
+
     def save_projection(
         self,
         task_id: str,

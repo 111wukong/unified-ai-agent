@@ -116,8 +116,14 @@ class Tool(ABC):
             metadata={"dry_run": True},
         )
 
-    def preview(self, args: dict[str, Any]) -> str:
-        """One-line human summary shown in confirmation prompts."""
+    def preview(self, args: dict[str, Any], ctx: ToolContext | None = None) -> str:
+        """Human summary shown in confirmation prompts.
+
+        `ctx` is optional, and only some tools want it: a write needs the
+        workspace to diff against the file that is actually on disk. The
+        default ignores it and dumps the arguments, which is the honest answer
+        for a tool whose whole effect is described by those arguments.
+        """
         return f"{self.spec.name}({json.dumps(args, ensure_ascii=False, default=str)})"
 
 

@@ -85,6 +85,8 @@ class ContextBuilder:
         )
 
         state_block_parts: list[str] = []
+        if state.prior_context:
+            state_block_parts.append(state.prior_context)
         if state.plan:
             state_block_parts.append(plan_block(state.plan, state.current_step))
         if state.compacted_summary:
