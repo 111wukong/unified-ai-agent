@@ -229,6 +229,18 @@ async function main() {
       await sleep(Number(process.env.SHOT_SETTLE_MS || 2500));
     }
 
+    // Optionally open a file preview, so a screenshot can show the pane that
+    // only exists once something has been clicked. Same reason as
+    // SHOT_OPEN_TASK: the default view is the one that says least.
+    if (process.env.SHOT_OPEN_FILE) {
+      await client.send("Runtime.evaluate", {
+        expression: `openPreview(${JSON.stringify(process.env.SHOT_OPEN_FILE)})`,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      await sleep(1200);
+    }
+
     const report = await client.send("Runtime.evaluate", {
       expression: `(function () {
         try {

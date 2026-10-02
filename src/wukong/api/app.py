@@ -284,6 +284,53 @@ def create_app(
             "entries": entries[:500],
         }
 
+    @app.get("/api/v1/files/content")
+    async def read_file(path: str) -> dict[str, Any]:
+        """A text file from the workspace, for the console's preview pane.
+
+        Read-only and size-capped. This is a *window*, not an editor: nothing
+        here can change a byte, so it cannot race the agent. The cap is not a
+        nicety either -- a preview that tries to render a 200 MB log freezes
+        the tab, and the failure looks like the console being broken rather
+        than like a file being too big.
+        """
+        root = Path(svc.settings.workspace).resolve()
+        target = (root / path).resolve()
+        if target != root and root not in target.parents:
+            raise HTTPException(status_code=400, detail="path escapes the workspace")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"not a file: {path}")
+
+        size = target.stat().st_size
+        if size > _PREVIEW_MAX_BYTES:
+            return {
+                "path": path,
+                "size": size,
+                "text": "",
+                "binary": False,
+                "reason": f"文件 {size} 字节，超过预览上限 {_PREVIEW_MAX_BYTES}",
+            }
+
+        raw = target.read_bytes()
+        # A NUL in the head is the cheap, reliable binary tell -- the same one
+        # git uses. Checking the whole file would mean reading it all to decide
+        # whether to read it.
+        if b"\x00" in raw[:8192]:
+            return {
+                "path": path,
+                "size": size,
+                "text": "",
+                "binary": True,
+                "reason": "二进制文件，不预览",
+            }
+        return {
+            "path": path,
+            "size": size,
+            "text": raw.decode("utf-8", errors="replace"),
+            "binary": False,
+            "reason": "",
+        }
+
     # -- sessions ---------------------------------------------------------
     @app.post("/api/v1/sessions")
     async def create_session(payload: SessionIn) -> dict[str, Any]:
@@ -856,6 +903,12 @@ async def _agui_stream(svc: Service, payload: AgUiRunInput) -> AsyncIterator[str
         replay=False, announce_start=True, launch=launch,
     ):
         yield agui.sse(event)
+
+
+#: Above this, the preview pane says how big the file is instead of rendering
+#: it. Half a megabyte is roughly where a `<pre>` stops being scrollable and
+#: starts being a frozen tab.
+_PREVIEW_MAX_BYTES = 512 * 1024
 
 
 def _file_sort_key(entry: Path) -> tuple[int, str]:

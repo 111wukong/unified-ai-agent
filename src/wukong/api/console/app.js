@@ -884,6 +884,64 @@ async function decide(verb) {
   }
 }
 
+/* ----------------------------------------------------------------- preview */
+
+/* A read-only look at one file.
+ *
+ * Read-only is the design, not a limitation. The agent may be mid-run holding
+ * a file it has already read, and an editor here would open a question nobody
+ * has answered -- whose version wins, and what happens to the agent's belief
+ * about the file when it loses. A window cannot race anything. */
+async function openPreview(path) {
+  const pane = $("preview");
+  const body = $("preview-body");
+  pane.hidden = false;
+  $("app").classList.add("with-preview");
+  setText($("preview-path"), path);
+  setText($("preview-meta"), "");
+  body.replaceChildren(el("div", "preview-note", "读取中…"));
+
+  let payload;
+  try {
+    payload = await json(`/api/v1/files/content?path=${encodeURIComponent(path)}`);
+  } catch (error) {
+    body.replaceChildren(
+      el("div", "preview-note error", `读取失败：${error.message || error}`),
+    );
+    return;
+  }
+
+  setText($("preview-meta"), formatBytes(payload.size));
+  if (!payload.text) {
+    body.replaceChildren(el("div", "preview-note", payload.reason || "（空文件）"));
+    return;
+  }
+  body.replaceChildren(renderCode(payload.text));
+}
+
+function closePreview() {
+  $("preview").hidden = true;
+  $("app").classList.remove("with-preview");
+}
+
+/* Line numbers, because a file without them is a wall.
+ *
+ * No syntax highlighting: that means shipping a tokeniser per language, and
+ * what actually helps you find your place in a file you did not write is
+ * knowing which line you are on. */
+function renderCode(text) {
+  const pre = el("pre", "code-view");
+  const gutter = el("span", "code-gutter");
+  const body = el("span", "code-body");
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    gutter.append(el("span", "code-ln", String(i + 1)));
+    body.append(el("span", "code-line", lines[i]));
+  }
+  pre.append(gutter, body);
+  return pre;
+}
+
 /* -------------------------------------------------------------------- tree */
 
 /* The workspace, one directory at a time.
@@ -921,11 +979,16 @@ async function loadTree(path = "", container = $("tree"), depth = 0) {
     if (!isDir && entry.size !== null) {
       label.append(el("span", "tree-size", formatBytes(entry.size)));
     }
+    const childPath = path ? `${path}/${entry.name}` : entry.name;
     row.append(label);
     container.append(row);
 
-    if (!isDir) continue;
-    const childPath = path ? `${path}/${entry.name}` : entry.name;
+    if (!isDir) {
+      label.addEventListener("click", () => {
+        openPreview(childPath).catch((error) => console.warn("preview failed", error));
+      });
+      continue;
+    }
     const kids = el("div", "tree-children");
     kids.hidden = true;
     container.append(kids);
@@ -1235,5 +1298,13 @@ for (const button of document.querySelectorAll(".example")) {
 $("btn-approve").onclick = () => decide("approve");
 $("btn-deny").onclick = () => decide("deny");
 $("btn-cancel").onclick = cancel;
+$("preview-close").onclick = closePreview;
+// Escape closes the preview, but not while a run is asking for approval --
+// dismissing the panel must never be the same gesture as answering it.
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("preview").hidden && $("approval").classList.contains("hidden")) {
+    closePreview();
+  }
+});
 
 boot();

@@ -966,3 +966,58 @@ class TestWorkspaceFiles:
             body = client.get(f"/api/v1/tasks/{task_id}").json()
 
         assert body["budgets"]["max_steps"] > 0
+
+
+class TestFilePreview:
+    """The read-only preview pane. It must not be able to change anything --
+    the agent may be mid-run holding a file it has already read, and an editor
+    here would open a question nobody has answered."""
+
+    def test_it_returns_the_text(self, api, workspace) -> None:
+        (workspace / "notes.md").write_text("# hello\n\nbody\n", encoding="utf-8")
+
+        with api([]) as client:
+            body = client.get("/api/v1/files/content", params={"path": "notes.md"}).json()
+
+        assert body["text"] == "# hello\n\nbody\n"
+        assert body["binary"] is False
+        assert body["size"] == 14
+
+    def test_a_path_outside_the_workspace_is_refused(self, api) -> None:
+        with api([]) as client:
+            response = client.get(
+                "/api/v1/files/content", params={"path": "../../../etc/hosts"}
+            )
+
+        assert response.status_code == 400
+
+    def test_a_directory_is_not_a_file(self, api, workspace) -> None:
+        (workspace / "a_dir").mkdir()
+
+        with api([]) as client:
+            response = client.get("/api/v1/files/content", params={"path": "a_dir"})
+
+        assert response.status_code == 404
+
+    def test_binary_content_is_declined_rather_than_mangled(self, api, workspace) -> None:
+        """Decoding a PNG as UTF-8 produces replacement characters, which the
+        pane would happily render as a file that looks corrupt but is not."""
+        (workspace / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+
+        with api([]) as client:
+            body = client.get("/api/v1/files/content", params={"path": "image.png"}).json()
+
+        assert body["binary"] is True
+        assert body["text"] == ""
+        assert body["reason"]
+
+    def test_an_oversized_file_reports_its_size_instead_of_freezing_the_tab(
+        self, api, workspace
+    ) -> None:
+        (workspace / "huge.log").write_text("x" * (600 * 1024), encoding="utf-8")
+
+        with api([]) as client:
+            body = client.get("/api/v1/files/content", params={"path": "huge.log"}).json()
+
+        assert body["text"] == ""
+        assert "600" in body["reason"] or "614400" in body["reason"]
