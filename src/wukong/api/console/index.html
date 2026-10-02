@@ -39,10 +39,20 @@
     </section>
 
     <section class="panel">
-      <h2 class="panel-title">沙箱</h2>
-      <div id="sandbox" class="sandbox">
-        <span class="skeleton"></span>
-      </div>
+      <details class="fold">
+        <summary class="panel-title">沙箱</summary>
+        <div id="sandbox" class="sandbox">
+          <span class="skeleton"></span>
+        </div>
+      </details>
+    </section>
+
+    <section class="panel panel-tree">
+      <h2 class="panel-title">
+        文件
+        <span class="panel-count" id="tree-count"></span>
+      </h2>
+      <div id="tree" class="tree"></div>
     </section>
 
     <section class="panel panel-grow">

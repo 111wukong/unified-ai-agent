@@ -443,6 +443,65 @@ function paintTask(node, task) {
  * it the content floated in the middle of a dark rectangle with nothing to
  * anchor it -- and no way to tell at a glance whether the thing on screen was
  * still running. */
+/* How much of the budget is gone.
+ *
+ * A run that ends on `steps budget exhausted` should not come as a surprise:
+ * the limit was known from the first step, and watching it climb is the
+ * difference between "it stopped" and "it ran out". Drawn as a bar rather than
+ * a fraction because the question is "how close", which a ratio answers at a
+ * glance and a pair of integers does not.
+ *
+ * The limits live on the task detail (they are part of the task's own record),
+ * not on the list rows, so they are fetched once per selected task and cached
+ * -- the list polls every few seconds and must not drag a detail call with it.
+ */
+const budgetCache = { taskId: null, limits: {} };
+
+async function renderBudget(task) {
+  const meta = $("topbar-meta");
+  if (!task) {
+    if (meta.dataset.wanted !== "") {
+      meta.dataset.wanted = "";
+      meta.replaceChildren();
+    }
+    return;
+  }
+
+  if (budgetCache.taskId !== task.id) {
+    budgetCache.taskId = task.id;
+    budgetCache.limits = {};
+    try {
+      budgetCache.limits = (await json(`/api/v1/tasks/${task.id}`)).budgets || {};
+    } catch {
+      /* the bar is a nicety; the run does not depend on it */
+    }
+  }
+
+  const steps = Number(task.steps_used || 0);
+  const tokens = Number(task.tokens_in || 0) + Number(task.tokens_out || 0);
+  const cost = Number(task.cost_usd || 0);
+  const limit = Number(budgetCache.limits.max_steps || 0);
+
+  const wanted = limit
+    ? `${steps}/${limit} 步 · ${tokens} token · $${cost.toFixed(4)}`
+    : `${steps} 步 · ${tokens} token`;
+  if (meta.dataset.wanted === wanted) return;
+  meta.dataset.wanted = wanted;
+
+  meta.replaceChildren(el("span", "budget-text", wanted));
+  if (!limit) return;
+
+  const ratio = Math.min(1, steps / limit);
+  // The last fifth is where a run is about to stop, and it is the only part of
+  // the bar anyone needs to notice.
+  const tone = ratio >= 0.8 ? "danger" : ratio >= 0.5 ? "warn" : "ok";
+  const bar = el("span", `budget-bar ${tone}`);
+  const fill = el("span", "budget-fill");
+  fill.style.width = `${Math.round(ratio * 100)}%`;
+  bar.append(fill);
+  meta.append(bar);
+}
+
 function renderTopbar(task) {
   setText($("topbar-title"), task ? task.id : "控制台");
   setTitle($("topbar-title"), task ? task.goal : "");
@@ -452,11 +511,7 @@ function renderTopbar(task) {
   setText(chip, task ? STATUS_LABEL[task.status] || task.status : STATUS_LABEL.idle);
   setTitle(chip, task?.status || "");
 
-  const meta = $("topbar-meta");
-  const wanted = task
-    ? `${task.steps_used} 步 · ${task.tokens_in + task.tokens_out} token`
-    : "";
-  if (meta.textContent !== wanted) meta.textContent = wanted;
+  renderBudget(task).catch((error) => console.warn("budget unavailable", error));
 }
 
 async function refreshTasks() {
@@ -829,6 +884,68 @@ async function decide(verb) {
   }
 }
 
+/* -------------------------------------------------------------------- tree */
+
+/* The workspace, one directory at a time.
+ *
+ * Lazy on purpose: a directory is fetched when it is opened, not when it is
+ * listed. The eager version walks the whole project on every page load, which
+ * on a repository with a `node_modules` in it is a slow way to populate a
+ * sidebar nobody asked to expand. */
+async function loadTree(path = "", container = $("tree"), depth = 0) {
+  let payload;
+  try {
+    payload = await json(`/api/v1/files?path=${encodeURIComponent(path)}`);
+  } catch (error) {
+    container.append(el("div", "tree-error", `读取失败：${error.message || error}`));
+    return;
+  }
+  if (depth === 0) {
+    container.replaceChildren();
+    setText($("tree-count"), String(payload.entries.length));
+  }
+  container.dataset.loaded = path;
+
+  if (!payload.entries.length) {
+    container.append(el("div", "tree-empty", "（空目录）"));
+    return;
+  }
+
+  for (const entry of payload.entries) {
+    const isDir = entry.type === "dir";
+    const row = el("div", `tree-row ${isDir ? "dir" : "file"}`);
+    const label = el("button", "tree-name");
+    label.type = "button";
+    label.append(el("span", "tree-icon", isDir ? "▸" : "·"));
+    label.append(el("span", "tree-text", entry.name));
+    if (!isDir && entry.size !== null) {
+      label.append(el("span", "tree-size", formatBytes(entry.size)));
+    }
+    row.append(label);
+    container.append(row);
+
+    if (!isDir) continue;
+    const childPath = path ? `${path}/${entry.name}` : entry.name;
+    const kids = el("div", "tree-children");
+    kids.hidden = true;
+    container.append(kids);
+    label.addEventListener("click", async () => {
+      const opening = kids.hidden;
+      kids.hidden = !opening;
+      setText(label.querySelector(".tree-icon"), opening ? "▾" : "▸");
+      if (opening && !kids.dataset.loaded) {
+        await loadTree(childPath, kids, depth + 1);
+      }
+    });
+  }
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
 /* -------------------------------------------------------------- SSE client */
 
 async function streamRun(body) {
@@ -1028,6 +1145,9 @@ async function boot() {
   }
 
   await refreshTasks();
+  // Loaded after the task list, not before: the list is what the page is for,
+  // and a slow directory read must not hold it up.
+  loadTree().catch((error) => console.warn("tree unavailable", error));
   // Open the most recent task on load, so the page shows where you left off
   // instead of an empty pane above a task list that has things in it.
   if (state.taskId) {

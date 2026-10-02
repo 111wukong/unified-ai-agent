@@ -911,3 +911,58 @@ class TestGuard:
     def test_health_reports_whether_a_token_is_required(self, guarded) -> None:
         with guarded(token=None) as client:
             assert client.get("/api/v1/health").json()["token_required"] is False
+
+
+class TestWorkspaceFiles:
+    """What the console's file tree reads, one directory at a time."""
+
+    def test_directories_come_before_files(self, api, workspace) -> None:
+        (workspace / "a_dir").mkdir()
+        (workspace / "z_file.txt").write_text("x", encoding="utf-8")
+
+        with api([]) as client:
+            entries = client.get("/api/v1/files").json()["entries"]
+
+        kinds = [e["type"] for e in entries]
+        assert kinds == sorted(kinds, key=lambda k: 0 if k == "dir" else 1)
+        assert {"a_dir", "z_file.txt"} <= {e["name"] for e in entries}
+
+    def test_a_path_outside_the_workspace_is_refused(self, api) -> None:
+        """Refused, not clamped.
+
+        Clamping means the caller reads a different directory than the one it
+        asked for and never finds out -- which is worse than an error, because
+        an error can be handled.
+        """
+        with api([]) as client:
+            response = client.get("/api/v1/files", params={"path": "../../../etc"})
+
+        assert response.status_code == 400
+
+    def test_hidden_entries_are_left_out(self, api, workspace) -> None:
+        (workspace / ".secret").write_text("x", encoding="utf-8")
+        (workspace / "visible.txt").write_text("x", encoding="utf-8")
+
+        with api([]) as client:
+            names = {e["name"] for e in client.get("/api/v1/files").json()["entries"]}
+
+        assert "visible.txt" in names
+        assert ".secret" not in names
+
+    def test_asking_for_a_file_as_a_directory_is_a_404(self, api, workspace) -> None:
+        (workspace / "notes.md").write_text("x", encoding="utf-8")
+
+        with api([]) as client:
+            response = client.get("/api/v1/files", params={"path": "notes.md"})
+
+        assert response.status_code == 404
+
+    def test_a_task_reports_the_budgets_it_was_created_with(self, api) -> None:
+        """The console draws a progress bar from these, so they have to survive
+        the round trip from the TASK_CREATED event to the API."""
+        client = api([{"content": "done"}])
+        with client:
+            task_id = client.post("/api/v1/tasks", json={"goal": "g", "wait": True}).json()["id"]
+            body = client.get(f"/api/v1/tasks/{task_id}").json()
+
+        assert body["budgets"]["max_steps"] > 0

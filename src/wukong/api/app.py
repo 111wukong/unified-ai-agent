@@ -245,6 +245,45 @@ def create_app(
             "caveats": svc.a.sandbox.caveats() if svc.a.sandbox else [],
         }
 
+    # -- workspace --------------------------------------------------------
+    @app.get("/api/v1/files")
+    async def list_files(path: str = "") -> dict[str, Any]:
+        """One directory of the workspace, for the console's file tree.
+
+        Scoped to the workspace on purpose: the console is a window onto the
+        project the agent is working in, not a file manager for the machine.
+        A path that escapes is refused rather than silently clamped -- clamping
+        is how someone ends up looking at a different file than the one they
+        asked for and never finds out.
+        """
+        root = Path(svc.settings.workspace).resolve()
+        target = (root / path).resolve() if path else root
+        if target != root and root not in target.parents:
+            raise HTTPException(status_code=400, detail="path escapes the workspace")
+        if not target.is_dir():
+            raise HTTPException(status_code=404, detail=f"not a directory: {path or '.'}")
+
+        entries: list[dict[str, Any]] = []
+        try:
+            for child in sorted(target.iterdir(), key=_file_sort_key):
+                if child.name.startswith("."):
+                    continue
+                try:
+                    is_dir = child.is_dir()
+                    size = None if is_dir else child.stat().st_size
+                except OSError:
+                    continue
+                entries.append(
+                    {"name": child.name, "type": "dir" if is_dir else "file", "size": size}
+                )
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="permission denied") from None
+
+        return {
+            "path": str(target.relative_to(root)) if target != root else "",
+            "entries": entries[:500],
+        }
+
     # -- sessions ---------------------------------------------------------
     @app.post("/api/v1/sessions")
     async def create_session(payload: SessionIn) -> dict[str, Any]:
@@ -629,7 +668,22 @@ def _task_view(svc: Service, task_id: str) -> dict[str, Any]:
         if state.pending_confirmation
         else None,
         "events": svc.a.store.last_seq(task_id),
+        "budgets": _budgets(svc, task_id),
     }
+
+
+def _budgets(svc: Service, task_id: str) -> dict[str, Any]:
+    """The limits this task was created with, for the console's progress bars.
+
+    Read from the TASK_CREATED event rather than the projection: the budgets
+    are part of the task's own record, and the projection is a convenience view
+    that does not carry them. The first event of a task is always its creation,
+    so this is one indexed row, not a scan.
+    """
+    for event in svc.a.store.events(task_id, limit=1):
+        if getattr(event.type, "value", event.type) == "task_created":
+            return dict((event.payload or {}).get("budgets") or {})
+    return {}
 
 
 def _require_pending(svc: Service, task_id: str) -> None:
@@ -802,6 +856,19 @@ async def _agui_stream(svc: Service, payload: AgUiRunInput) -> AsyncIterator[str
         replay=False, announce_start=True, launch=launch,
     ):
         yield agui.sse(event)
+
+
+def _file_sort_key(entry: Path) -> tuple[int, str]:
+    """Directories first, then case-insensitive by name.
+
+    A tree that mixes them alphabetically makes the reader hunt for the folder
+    they want. Grouping is what every file browser does, and it costs nothing.
+    """
+    try:
+        is_dir = entry.is_dir()
+    except OSError:
+        is_dir = False
+    return (0 if is_dir else 1, entry.name.lower())
 
 
 def _prior_context(store: Any, session_id: str) -> str:
