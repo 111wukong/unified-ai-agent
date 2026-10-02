@@ -487,3 +487,65 @@ class TestAFinishedPlanIsNotTheWork:
 
         assert state.plan[0].status is StepStatus.COMPLETED
         assert state.plan[1].status is StepStatus.RUNNING
+
+
+class TestAStepThatIsNeverTickedOff:
+    """The checklist *is* the cursor, so an unticked step is one you never leave.
+
+    From a real run: the model never called `update_plan` at all, so
+    `current_step` stayed at 0 for the whole task -- 30 steps, 54 tool calls,
+    every one of them logged under `step_1`, the plan untouched from start to
+    finish. It died on the step budget having read a great deal and produced
+    nothing. Nothing else about the run looked wrong.
+    """
+
+    async def test_a_stalled_step_gets_named(self, scripted, session_id: str) -> None:
+        # Twelve turns of reading, none of them touching the plan.
+        agent, _ = await scripted(
+            [
+                {
+                    "tool_calls": [
+                        {"name": "read_file", "arguments": {"path": f"notes{i}.md"}}
+                    ]
+                }
+                for i in range(12)
+            ]
+        )
+        agent.settings.agent.max_steps = 12
+
+        result = await agent.runtime.run("继续", session_id=session_id)
+
+        state = replay(agent.store.events(result.task_id), task_id=result.task_id)
+        notes = [
+            e
+            for e in state.log
+            if e.kind == "system" and "without ticking it off" in (e.text or "")
+        ]
+        assert notes, "a step that never moves has to be named out loud"
+        assert "update_plan" in notes[0].text, "and the note has to say how to move it"
+
+    async def test_the_stall_note_does_not_tick_the_step_itself(
+        self, scripted, session_id: str
+    ) -> None:
+        """Naming a stall is not the same as declaring the work done.
+
+        A wrong tick is worse than a stall: it hides the problem and the model
+        then builds the next step on work that never happened.
+        """
+        agent, _ = await scripted(
+            [
+                {
+                    "tool_calls": [
+                        {"name": "read_file", "arguments": {"path": f"n{i}.md"}}
+                    ]
+                }
+                for i in range(12)
+            ]
+        )
+        agent.settings.agent.max_steps = 12
+
+        result = await agent.runtime.run("继续", session_id=session_id)
+        state = replay(agent.store.events(result.task_id), task_id=result.task_id)
+
+        assert state.current_step == 0
+        assert all(step.status is not StepStatus.COMPLETED for step in state.plan)

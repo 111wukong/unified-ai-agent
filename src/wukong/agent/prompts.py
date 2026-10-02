@@ -161,5 +161,10 @@ def plan_block(steps: list[Any], current: int) -> str:
             "write the final answer now, as plain text."
         )
     else:
-        lines.append("Tick steps off with `update_plan` when they are done.")
+        lines.append(
+            "Tick a step off with `update_plan` the moment it is done — before "
+            "starting the next one. The cursor is derived from these marks, so "
+            "a finished step that is not ticked keeps you on it and the run "
+            "stalls."
+        )
     return "\n".join(lines)

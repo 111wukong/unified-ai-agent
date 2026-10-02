@@ -428,6 +428,14 @@ class AgentConfig(BaseModel):
     repeat_read_limit: int = 3
     # Fraction of the context window reserved for the model's own output.
     output_reserve_ratio: float = 0.15
+    # Fraction of the prompt budget at which the log is folded into a summary.
+    #
+    # This is the knob that decides what a step *costs*: every step re-sends
+    # the whole rendered log, so a log allowed to grow to half of a 400k budget
+    # means late steps pay 200k tokens of prompt apiece. Compacting earlier
+    # trades summarisation calls for much smaller prompts -- and on a
+    # provider billed per token, that trade is nearly always worth making.
+    compact_at_ratio: float = 0.3
     # Post-task memory + skill-candidate extraction. Off by default because
     # it costs one extra model call per task, and that is a cost the user
     # should opt into. `wukong run --reflect` and the HTTP layer both set it.

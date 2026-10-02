@@ -387,6 +387,11 @@ input:focus, textarea:focus {
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
   flex: none;
+  /* The transcript scrolls underneath this. Without a stacking context of its
+     own the first message rides up into the header and the task id is left
+     half-covered by text that belongs below it. */
+  position: relative;
+  z-index: 2;
 }
 
 .topbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -660,7 +665,12 @@ input:focus, textarea:focus {
 .tool-head:hover { background: var(--bg-raised); color: var(--text); }
 
 .tool-mark { width: 12px; flex: none; text-align: center; color: var(--text-faint); }
+.tool-icon { display: grid; place-items: center; width: 15px; flex: none; color: var(--text-faint); }
 .tool-name { color: var(--text); flex: none; }
+
+.tool.running .tool-icon { color: var(--accent); }
+.tool.ok .tool-icon { color: var(--text-dim); }
+.tool.failed .tool-icon { color: var(--danger); }
 
 .tool-arg {
   color: var(--text-faint);

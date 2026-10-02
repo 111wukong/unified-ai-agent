@@ -178,6 +178,14 @@ class AgentState(BaseModel):
     # monotonic so "[12]" still refers to the same thing after a compaction.
     log_offset: int = 0
     compacted_summary: str | None = None
+    #: The recalled-memory block, computed once and reused.
+    #:
+    #: The query is the goal, and the goal does not change during a run, so
+    #: every step after the first was asking the same question and getting the
+    #: same answer -- at the price of a hybrid search plus an event. One run
+    #: paid for that thirty times and got zero hits every time. `None` means
+    #: "not looked yet"; `""` means "looked, found nothing".
+    memory_block: str | None = None
     steps_used: int = 0
     model_calls: int = 0
     usage: TokenUsage = Field(default_factory=TokenUsage)

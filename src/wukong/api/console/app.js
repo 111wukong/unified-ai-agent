@@ -211,6 +211,53 @@ function summariseResult(content) {
   return clean.length > 64 ? `${clean.slice(0, 64)}…` : clean;
 }
 
+/* One glyph per *family*, not per tool.
+ *
+ * Twenty-two bespoke icons is a drawing exercise; five is a vocabulary you
+ * learn in one glance. The point is to let a column of calls be scanned for
+ * shape -- a run of document glyphs is reading, a chevron is a side effect --
+ * without reading a single tool name. */
+const TOOL_ICON = {
+  read: "M5 3h7l5 5v13H5zM12 3v5h5",
+  write: "M4 20h4L19 9a2 2 0 0 0-3-3L5 17zM14 6l3 3",
+  exec: "M5 7l5 5-5 5M13 17h6",
+  vcs: "M6 4v16M6 8h9a3 3 0 0 1 3 3v9M18 17l-2-2M18 17l2-2",
+  plan: "M4 7h16M4 12h16M4 17h10",
+  other: "M12 6v12M6 12h12",
+};
+
+const TOOL_FAMILY = [
+  [/^(read_file|list_directory|file_info|search_files|grep|recall|list_memory|search_memory)$/, "read"],
+  [/^(write_file|apply_patch|delete_file|delete_memory|save_memory|update_plan)$/, "write"],
+  [/^run_command$/, "exec"],
+  [/^git_/, "vcs"],
+  [/^(load_skill|finish)$/, "plan"],
+];
+
+function toolFamily(name) {
+  for (const [pattern, family] of TOOL_FAMILY) {
+    if (pattern.test(name)) return family;
+  }
+  return "other";
+}
+
+function toolIcon(name) {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "13");
+  svg.setAttribute("height", "13");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.7");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  const path = document.createElementNS(NS, "path");
+  path.setAttribute("d", TOOL_ICON[toolFamily(name)]);
+  svg.append(path);
+  return svg;
+}
+
 /* Follow the tail, but only once per frame, and never while the reader is
  * somewhere else.
  *
@@ -558,7 +605,9 @@ function renderEvent(event) {
       const node = el("details", "tool running");
       const head = el("summary", "tool-head");
       const mark = el("span", "tool-mark", "·");
-      head.append(mark, el("span", "tool-name", event.toolCallName));
+      const icon = el("span", "tool-icon");
+      icon.append(toolIcon(event.toolCallName));
+      head.append(mark, icon, el("span", "tool-name", event.toolCallName));
       node.append(head);
 
       const args = el("pre", "tool-args");

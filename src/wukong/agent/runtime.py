@@ -50,6 +50,13 @@ from wukong.types import EffectClass, TokenUsage, ToolCall
 
 ProgressHook = Callable[[str, dict[str, Any]], None]
 
+#: Steps on one plan step before the runtime says something about it.
+#:
+#: Eight is long enough that a genuinely slow step is not interrupted, and
+#: short enough that a stuck one is caught while there is still budget left to
+#: recover with.
+_STALL_AFTER = 8
+
 
 class AgentResult(BaseModel):
     task_id: str
@@ -417,6 +424,18 @@ class AgentRuntime:
 
         self._transition(state, TaskStatus.RUNNING)
 
+        #: How many steps in a row have gone by on the same plan step.
+        #:
+        #: A step the model never ticks off is a step it never leaves: the
+        #: cursor is *derived* from the checklist, so an unmarked step keeps
+        #: the run inside itself until the budget dies. One did exactly that
+        #: -- 30 steps, 54 tool calls, every one of them logged under
+        #: `step_1`, while the plan above it sat untouched from start to
+        #: finish. Nothing else about that run looked wrong, which is why the
+        #: stall has to be counted explicitly.
+        stalled_on_step = 0
+        last_step = state.current_step
+
         while True:
             # --- budget gate -------------------------------------------
             over = self._check_budget(state, max_steps)
@@ -504,6 +523,15 @@ class AgentRuntime:
             self._persist(state)
             if finished is not None:
                 return finished
+
+            # --- stalled on a step it will not tick off ------------------
+            if state.current_step != last_step:
+                last_step = state.current_step
+                stalled_on_step = 0
+            else:
+                stalled_on_step += 1
+                if stalled_on_step == _STALL_AFTER:
+                    self._note_stalled_step(state, stalled_on_step)
 
     async def _run_tool_calls(
         self, calls: list[ToolCall], state: AgentState
@@ -598,6 +626,36 @@ class AgentRuntime:
                 "count": verdict.count,
                 "action": "annotated",
             },
+        )
+
+    def _note_stalled_step(self, state: AgentState, steps: int) -> None:
+        """Say out loud that the checklist has not moved.
+
+        The step is deliberately *not* advanced here. Ticking it off on the
+        model's behalf would be a guess about work nobody verified, and a
+        wrong tick is worse than a stall -- it hides the problem rather than
+        naming it, and the model would then build on a step that never
+        happened. Naming the stall leaves the judgement where it belongs.
+        """
+        entry = LogEntry(
+            index=0,
+            kind="system",
+            step_id=state.step_id(),
+            text=(
+                f"You have now spent {steps} steps on this one step without "
+                f"ticking it off. The cursor is derived from the plan's marks, "
+                f"so it cannot move until you call `update_plan`.\n"
+                f"- If the step is done: call `update_plan` now, with it marked "
+                f"`completed`.\n"
+                f"- If it is not done: stop reading more files. Say what is "
+                f"missing and what you will do differently."
+            ),
+        )
+        state.append_log(entry)
+        self.store.append(
+            state.task_id,
+            EventType.LOG_APPENDED,
+            {"entry": entry.model_dump(mode="json")},
         )
 
     def _note_skill_loaded(self, entry: LogEntry, state: AgentState) -> None:
@@ -835,10 +893,15 @@ class AgentRuntime:
     async def _memory_block(self, state: AgentState) -> str:
         """Recalled memories, hybrid when a provider is configured.
 
-        The query is the goal rather than the last observation: at this point
-        in the loop the goal is what defines relevance, and embedding a
-        changing query every step would make the recalled set flicker.
+        Searched once per task, not once per step. The query is the goal, and
+        the goal does not change -- so every step after the first was asking
+        the same question and paying for a hybrid search plus a
+        MEMORY_SEARCHED event to get the same answer back. One run did that
+        thirty times and matched nothing on any of them.
         """
+        if state.memory_block is not None:
+            return state.memory_block
+
         mode = "fts"
         if self.memory is not None:
             try:
@@ -862,10 +925,12 @@ class AgentRuntime:
             },
         )
         if not hits:
+            state.memory_block = ""
             return ""
         lines = ["# Recalled memories", ""]
         lines += [f"- [{h['scope']}] {h['content'][:400]}" for h in hits]
-        return "\n".join(lines)
+        state.memory_block = "\n".join(lines)
+        return state.memory_block
 
     async def _maybe_compact(self, state: AgentState) -> None:
         if self._context is None:

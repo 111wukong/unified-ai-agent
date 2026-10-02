@@ -263,7 +263,7 @@ class ContextBuilder:
         if len(state.log) <= keep:
             return False
         log_tokens = sum(estimate_tokens(e.render(max_chars=20_000)) for e in state.log)
-        return log_tokens > self.budget() * 0.5
+        return log_tokens > self.budget() * self.settings.agent.compact_at_ratio
 
     async def maybe_compact(self, state: AgentState) -> bool:
         if not self.should_compact(state):
