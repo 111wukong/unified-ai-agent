@@ -219,6 +219,19 @@ class TestIconRendering:
         assert worst <= 1024, f"largest sampled grid is {worst}px"
 
     def test_rendering_the_whole_iconset_is_fast_enough(self) -> None:
+        """A wall-clock assertion, so it has to be scoped to the path it means
+        to measure.
+
+        `--bundle` produces a macOS `.app`, and on macOS `render_icon` shells
+        out to `sips`. Everywhere else it runs a slower pure-Python fallback --
+        so one budget was measuring two different code paths. On a loaded CI
+        runner the fallback took 15.5s against a 10s limit and went red for a
+        reason that says nothing about the icon set.
+
+        The budget is wider on the fallback rather than the test being skipped:
+        this file's own rule is that macOS-only paths assert on other platforms
+        instead of vanishing.
+        """
         import time
 
         bundle_mod.render_icon.cache_clear()
@@ -226,7 +239,11 @@ class TestIconRendering:
         for size in bundle_mod.ICONSET_SIZES:
             bundle_mod.render_icon(size)
         elapsed = time.perf_counter() - started
-        assert elapsed < 10.0, f"icon set took {elapsed:.1f}s; --bundle would feel broken"
+
+        budget = 10.0 if sys.platform == "darwin" else 60.0
+        assert elapsed < budget, (
+            f"icon set took {elapsed:.1f}s on {sys.platform}; --bundle would feel broken"
+        )
 
 
 class TestAppBundle:
