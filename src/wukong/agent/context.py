@@ -117,15 +117,7 @@ class ContextBuilder:
         log_text = self._render_log(state, chars=self._log_render_chars(remaining))
         if log_text:
             messages.append(Message(role="user", content=log_text))
-        messages.append(
-            Message(
-                role="user",
-                content=(
-                    "Continue. Call a tool, or write the final answer if you are done. "
-                    "If you are blocked, say so and explain why."
-                ),
-            )
-        )
+        messages.append(Message(role="user", content=continue_prompt(state)))
         return messages
 
     def _repeat_block(self, state: AgentState) -> str:
@@ -350,3 +342,41 @@ def _merge(previous: str | None, new: str) -> str:
     if not previous:
         return new
     return f"{previous}\n\n---\n{new}"
+
+
+#: Statuses that mean a step needs no further work.
+_SETTLED = {"completed", "skipped"}
+
+
+def plan_is_finished(state: AgentState) -> bool:
+    """True when a plan exists and nothing on it is still outstanding."""
+    if not state.plan:
+        return False
+    for step in state.plan:
+        status = getattr(step, "status", "pending")
+        status = getattr(status, "value", status)
+        if status not in _SETTLED:
+            return False
+    return True
+
+
+def continue_prompt(state: AgentState) -> str:
+    """The nudge appended after the log, which has to match the situation.
+
+    A finished plan needs a different instruction from one still in progress.
+    The generic "call a tool, or write the final answer" left a model that had
+    already ticked every box picking the first half of that sentence over and
+    over: it re-sent `update_plan` thirteen times and died on the step budget,
+    with the answer it had earned still unwritten.
+    """
+    if plan_is_finished(state):
+        return (
+            "Every step on the plan is done. Write the final answer now as plain "
+            "text — do not call `update_plan` again, and do not call another tool "
+            "unless something is genuinely missing. If work remains, say exactly "
+            "what is unfinished."
+        )
+    return (
+        "Continue. Call a tool, or write the final answer if you are done. "
+        "If you are blocked, say so and explain why."
+    )

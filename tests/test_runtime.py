@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 
-from wukong.agent.state import TaskStatus, replay
+from wukong.agent.context import continue_prompt, plan_is_finished
+from wukong.agent.planner import apply_plan_update
+from wukong.agent.state import AgentState, PlanStep, StepStatus, TaskStatus, replay
 from wukong.config import ModelSpec
 from wukong.errors import ModelError
 from wukong.observability.events import EventType
@@ -413,3 +415,75 @@ class TestEmptyResponse:
             agent.close()
 
         assert result.status == TaskStatus.FAILED.value
+
+
+class TestAFinishedPlanIsNotTheWork:
+    """A checklist with nothing left on it must not become the treadmill.
+
+    From a real run: five steps, every one ticked off, and then the same
+    all-complete plan re-sent thirteen times instead of an answer. The
+    document the user asked for was already on disk. The task still ended
+    `failed` on an exhausted step budget, 229k tokens later.
+
+    Three things had to be true at once for that, so three things are pinned
+    here: the tool list, the closing nudge, and what a rewrite does to a step
+    that was already settled.
+    """
+
+    @staticmethod
+    def _state(session_id: str, *statuses: StepStatus) -> AgentState:
+        state = AgentState(task_id="task_x", session_id=session_id, goal="写一首古体诗")
+        state.plan = [
+            PlanStep(id=f"step_{i + 1}", description=f"第 {i + 1} 步", status=s)
+            for i, s in enumerate(statuses)
+        ]
+        return state
+
+    async def test_update_plan_is_withdrawn_once_nothing_is_outstanding(
+        self, scripted, session_id: str
+    ) -> None:
+        agent, _ = await scripted([])
+        state = self._state(session_id, StepStatus.COMPLETED, StepStatus.COMPLETED)
+
+        names = {spec["function"]["name"] for spec in agent.runtime._tool_specs(state)}
+
+        assert "update_plan" not in names
+        assert names, "the other tools must still be offered"
+
+    async def test_update_plan_stays_while_a_step_is_outstanding(
+        self, scripted, session_id: str
+    ) -> None:
+        agent, _ = await scripted([])
+        state = self._state(session_id, StepStatus.COMPLETED, StepStatus.PENDING)
+
+        names = {spec["function"]["name"] for spec in agent.runtime._tool_specs(state)}
+
+        assert "update_plan" in names
+
+    def test_a_skipped_step_counts_as_settled(self, session_id: str) -> None:
+        assert plan_is_finished(self._state(session_id, StepStatus.SKIPPED))
+
+    def test_the_nudge_stops_asking_for_tools_once_the_plan_is_done(
+        self, session_id: str
+    ) -> None:
+        done = continue_prompt(self._state(session_id, StepStatus.COMPLETED))
+        running = continue_prompt(self._state(session_id, StepStatus.PENDING))
+
+        assert "update_plan" in done
+        assert "final answer" in done
+        assert running.startswith("Continue.")
+
+    def test_a_revision_keeps_a_settled_step_settled(self, session_id: str) -> None:
+        """The model re-sends the whole list; omitting `status` is not a reset."""
+        state = self._state(session_id, StepStatus.COMPLETED, StepStatus.PENDING)
+
+        apply_plan_update(
+            state,
+            [
+                {"description": "第 1 步"},
+                {"description": "第 2 步", "status": "running"},
+            ],
+        )
+
+        assert state.plan[0].status is StepStatus.COMPLETED
+        assert state.plan[1].status is StepStatus.RUNNING

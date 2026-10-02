@@ -50,6 +50,127 @@ function el(tag, className, text) {
   return node;
 }
 
+/* ---------------------------------------------------------------- markdown
+ *
+ * The model writes Markdown; this renders it. Hand-rolled rather than pulled
+ * in -- the project has no dependencies, and a renderer that builds DOM nodes
+ * cannot inject markup the way `innerHTML` can.
+ *
+ * Deliberately partial: fenced code, inline code, bold, italic, headings,
+ * lists and links. Everything else falls through as literal text, which is
+ * the right failure mode -- a console that mangles a table is worse than one
+ * that shows it plainly.
+ */
+
+const MD_BLOCK = /^(?:```|#{1,4}\s|\s*[-*+]\s|\s*\d+[.)]\s)/;
+
+function renderMarkdown(text) {
+  const frag = document.createDocumentFragment();
+  const lines = String(text ?? "").split("\n");
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (/^```/.test(line)) {
+      const lang = line.slice(3).trim();
+      const body = [];
+      i += 1;
+      while (i < lines.length && !/^```/.test(lines[i])) {
+        body.push(lines[i]);
+        i += 1;
+      }
+      i += 1; // the closing fence, or the end of an unterminated block
+      const pre = el("pre", "md-pre");
+      const code = el("code", "", body.join("\n"));
+      if (lang) code.dataset.lang = lang;
+      pre.append(code);
+      frag.append(pre);
+      continue;
+    }
+
+    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (heading) {
+      const node = el("div", `md-head md-h${heading[1].length}`);
+      appendInline(node, heading[2]);
+      frag.append(node);
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*[-*+]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line)) {
+      const ordered = /^\s*\d+[.)]\s+/.test(line);
+      const list = el(ordered ? "ol" : "ul", "md-list");
+      while (
+        i < lines.length &&
+        (/^\s*[-*+]\s+/.test(lines[i]) || /^\s*\d+[.)]\s+/.test(lines[i]))
+      ) {
+        const item = el("li", "");
+        appendInline(item, lines[i].replace(/^\s*(?:[-*+]|\d+[.)])\s+/, ""));
+        list.append(item);
+        i += 1;
+      }
+      frag.append(list);
+      continue;
+    }
+
+    if (!line.trim()) {
+      i += 1;
+      continue;
+    }
+
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !MD_BLOCK.test(lines[i])) {
+      para.push(lines[i]);
+      i += 1;
+    }
+    const node = el("div", "md-p");
+    appendInline(node, para.join("\n"));
+    frag.append(node);
+  }
+
+  return frag;
+}
+
+/* Inline code is split out first, so `**` inside a span stays literal. */
+function appendInline(parent, text) {
+  for (const part of String(text).split(/(`[^`]+`)/g)) {
+    if (part.length > 2 && part.startsWith("`") && part.endsWith("`")) {
+      parent.append(el("code", "md-code", part.slice(1, -1)));
+    } else {
+      appendEmphasis(parent, part);
+    }
+  }
+}
+
+function appendEmphasis(parent, text) {
+  const re = /(\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\(https?:\/\/[^\s)]+\))/g;
+  let last = 0;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) {
+      parent.append(document.createTextNode(text.slice(last, match.index)));
+    }
+    const token = match[0];
+    if (token.startsWith("**")) {
+      parent.append(el("strong", "", token.slice(2, -2)));
+    } else if (token.startsWith("[")) {
+      const link = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/.exec(token);
+      const anchor = el("a", "", link[1]);
+      anchor.href = link[2];
+      anchor.target = "_blank";
+      anchor.rel = "noreferrer";
+      parent.append(anchor);
+    } else {
+      parent.append(el("em", "", token.slice(1, -1)));
+    }
+    last = match.index + token.length;
+  }
+  if (last < text.length) {
+    parent.append(document.createTextNode(text.slice(last)));
+  }
+}
+
 /* The one argument worth showing on the collapsed line.
  *
  * A tool call is identified by what it acted on -- `read_file orders/calc.py`
@@ -74,6 +195,20 @@ function summariseArgs(raw) {
   }
   const first = Object.values(parsed).find((value) => typeof value === "string" && value);
   return first ? String(first).slice(0, 58) : "";
+}
+
+/* The gist of a result, for the collapsed row.
+ *
+ * The first line that has anything in it, because tool output usually leads
+ * with the answer and follows with detail -- `list_directory` returns the
+ * listing, `read_file` returns the file. Picking the *last* line would show
+ * the trailing blank. */
+function summariseResult(content) {
+  const text = String(content ?? "").trim();
+  if (!text) return "";
+  const line = text.split("\n").find((candidate) => candidate.trim()) || "";
+  const clean = line.trim().replace(/\s+/g, " ");
+  return clean.length > 64 ? `${clean.slice(0, 64)}…` : clean;
 }
 
 /* Follow the tail, but only once per frame, and never while the reader is
@@ -251,6 +386,9 @@ function paintTask(node, task) {
   setText(node.chip, STATUS_LABEL[task.status] || task.status);
   setTitle(node.chip, task.status);
   setText(node.stats, `${task.steps_used} 步 · ${task.tokens_in + task.tokens_out} token`);
+  // The status *key*, not its label: the colour is chosen from this and the
+  // text is looked up separately, so a translated label cannot lose the colour.
+  node.item.dataset.state = task.status;
   node.item.classList.toggle("active", task.id === state.taskId);
 }
 
@@ -394,7 +532,7 @@ function renderEvent(event) {
       break;
 
     case "TEXT_MESSAGE_START": {
-      const body = el("div", "body");
+      const body = el("div", "body md");
       run.assistant.append(body);
       run.messageText.set(event.messageId, body);
       break;
@@ -403,7 +541,11 @@ function renderEvent(event) {
     case "TEXT_MESSAGE_CONTENT": {
       const body = run.messageText.get(event.messageId);
       if (body) {
-        body.textContent += event.delta || "";
+        // Re-render the whole message instead of appending to the DOM: a
+        // fenced block that arrives one line at a time has to be able to
+        // change its mind about what it is. `dataset.raw` keeps the source.
+        body.dataset.raw = (body.dataset.raw || "") + (event.delta || "");
+        body.replaceChildren(renderMarkdown(body.dataset.raw));
         scrollToBottom();
       }
       break;
@@ -451,6 +593,13 @@ function renderEvent(event) {
         node.classList.remove("running");
         node.classList.add(ok ? "ok" : "failed");
         setText(node.querySelector(".tool-mark"), ok ? "✓" : "✕");
+
+        // A one-line gist on the collapsed row. Without it, knowing whether a
+        // call found anything meant opening all of them -- which is the thing
+        // collapsing was supposed to avoid.
+        const gist = summariseResult(event.content);
+        if (gist) node.querySelector(".tool-head")?.append(el("span", "tool-gist", gist));
+
         const result = el("pre", "tool-result");
         result.textContent = String(event.content ?? "").slice(0, 4000);
         node.append(result);

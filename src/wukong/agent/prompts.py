@@ -7,6 +7,19 @@ from typing import Any
 SYSTEM_PROMPT = """\
 You are an autonomous coding agent running on the user's machine.
 
+# Language
+
+Think in Chinese and answer in Chinese (简体中文). This covers your
+reasoning, whatever you say between tool calls, the descriptions you write
+in a plan, and the final answer.
+
+Leave code, file paths, commands, tool arguments and identifiers exactly as
+they are — translating those breaks them. Keep well-known technical terms
+in their usual form (e.g. `commit`, `token`, `prompt`) when the Chinese
+equivalent would be less clear.
+
+Only switch to another language if the user explicitly asks you to.
+
 # How you work
 
 You operate in a loop. On each turn you either call tools or give the final
@@ -23,6 +36,13 @@ project structure or command output when you can look.
 - Prefer `apply_patch` over rewriting a whole file.
 - `run_command` executes a single command with no shell. Pipes, `&&` and
   redirects are refused. Run one command per call.
+
+# Finishing
+
+A plan is a checklist, not the work. When every step is settled, the only
+remaining move is the final answer: write it, in Chinese, as plain text.
+Do not keep re-sending the plan to confirm it — that is not progress, and
+it burns the step budget without producing anything.
 
 # Budgets and limits
 
@@ -49,6 +69,8 @@ You are the planning component of a coding agent.
 Produce a short, ordered plan for the goal below.
 
 Rules:
+- Write every `description` in Chinese (简体中文). Keep file paths, command
+  names and identifiers untranslated.
 - 2 to 8 steps. Fewer is better; a plan longer than the budget is useless.
 - Each step is an *intention*, not a bound call. Do not write arguments.
 - `expected_tools` lists the tool names the step will probably need, chosen
@@ -117,6 +139,7 @@ def plan_block(steps: list[Any], current: int) -> str:
         return ""
     marks = {"pending": " ", "running": "~", "completed": "x", "failed": "!", "skipped": "-"}
     lines = ["# Plan"]
+    outstanding = 0
     for i, step in enumerate(steps):
         status = getattr(step, "status", "pending")
         status = getattr(status, "value", status)
@@ -124,6 +147,19 @@ def plan_block(steps: list[Any], current: int) -> str:
         lines.append(f"[{marks.get(status, ' ')}] {i + 1}. {step.description}{cursor}")
         if getattr(step, "note", ""):
             lines.append(f"      note: {step.note}")
+        if status not in {"completed", "skipped"}:
+            outstanding += 1
     lines.append("")
-    lines.append("Tick steps off with `update_plan` when they are done.")
+    if outstanding == 0:
+        # A finished checklist used to still end with "tick steps off with
+        # update_plan". A real run read that as an instruction, re-sent the
+        # same all-complete plan 13 times, and died on the step budget --
+        # having already produced the file it was asked for. Once nothing is
+        # outstanding, the only useful next move is prose.
+        lines.append(
+            "Every step is complete. Do NOT call `update_plan` again — "
+            "write the final answer now, as plain text."
+        )
+    else:
+        lines.append("Tick steps off with `update_plan` when they are done.")
     return "\n".join(lines)

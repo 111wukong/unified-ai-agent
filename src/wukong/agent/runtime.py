@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
-from wukong.agent.context import ContextBuilder
+from wukong.agent.context import ContextBuilder, plan_is_finished
 from wukong.agent.execution_identity import ExecutionIdentity, fingerprint, verify
 from wukong.agent.executor import FINISH_TOOL, PLAN_TOOL, SKILL_TOOL, ToolRunner
 from wukong.agent.planner import Planner, apply_plan_update
@@ -696,10 +696,28 @@ class AgentRuntime:
 
         return on_delta
 
+    def _tool_specs(self, state: AgentState) -> list[dict[str, Any]]:
+        """The tool list for this turn.
+
+        Once every plan step is settled, `update_plan` has nothing left to do.
+        Leaving it on the list is how a run that had already produced its
+        answer kept "ticking steps off" a finished checklist until the step
+        budget ran out -- thirteen identical revisions and not one line of
+        prose. Withdrawing the tool leaves writing the answer as the only
+        move that makes sense.
+        """
+        specs = self.registry.specs()
+        if plan_is_finished(state):
+            specs = [
+                s for s in specs if (s.get("function") or {}).get("name") != PLAN_TOOL
+            ]
+        return specs
+
     async def _call_model(self, state: AgentState, messages: list, *, stream: Any = None) -> Any:
         model = self._model
         attempts = max(1, self.settings.agent.model_retry_attempts)
         last: ModelError | None = None
+        specs = self._tool_specs(state)
         self.store.append(
             state.task_id,
             EventType.MODEL_REQUEST,
@@ -707,14 +725,12 @@ class AgentRuntime:
                 "phase": "step",
                 "messages": len(messages),
                 "attempt": 1,
-                "tools": len(self.registry.specs()),
+                "tools": len(specs),
             },
         )
         for attempt in range(attempts):
             try:
-                return await model.chat(
-                    messages, tools=self.registry.specs(), stream=stream
-                )
+                return await model.chat(messages, tools=specs, stream=stream)
             except ModelError as exc:
                 last = exc
                 self.store.append(

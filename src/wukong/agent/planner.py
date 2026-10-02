@@ -230,18 +230,34 @@ def _extract_json(raw: str) -> Any:
 
 
 def apply_plan_update(state: AgentState, steps_payload: list[dict[str, Any]]) -> None:
-    """Replace the plan from an `update_plan` tool call."""
+    """Replace the plan from an `update_plan` tool call.
+
+    A step the model has already settled keeps that status when the model
+    omits `status` on the rewrite. It re-sends the whole list every time, and
+    silently dropping a finished step back to `pending` is not cosmetic: the
+    cursor is *derived* from the checklist, so the run would restart that step
+    and can circle until the budget dies. An explicit status always wins --
+    this only fills in what the model left out.
+    """
+    settled = {
+        s.description: s.status
+        for s in state.plan
+        if s.status in {StepStatus.COMPLETED, StepStatus.SKIPPED}
+    }
     new_steps: list[PlanStep] = []
     for i, item in enumerate(steps_payload[:12]):
-        status = str(item.get("status") or "pending")
-        if status not in {s.value for s in StepStatus}:
-            status = "pending"
+        description = str(item.get("description") or "").strip() or f"step {i + 1}"
+        raw = str(item.get("status") or "")
+        if raw in {s.value for s in StepStatus}:
+            status = StepStatus(raw)
+        else:
+            status = settled.get(description, StepStatus.PENDING)
         new_steps.append(
             PlanStep(
                 id=f"step_{i + 1}",
-                description=str(item.get("description") or "").strip() or f"step {i + 1}",
+                description=description,
                 expected_tools=[str(t) for t in (item.get("expected_tools") or [])],
-                status=StepStatus(status),
+                status=status,
                 note=str(item.get("note") or ""),
             )
         )

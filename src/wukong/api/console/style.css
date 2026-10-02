@@ -308,18 +308,30 @@ input:focus, textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 10px 11px;
+  padding: 10px 11px 10px 13px;
   border-radius: var(--radius-sm);
   border: 1px solid transparent;
+  /* A status rail down the left edge. The chip already states the status, but
+     a chip is a word you have to read and a rail is a colour you can scan --
+     and a task list is scanned far more often than it is read. */
+  border-left: 3px solid var(--border-strong);
   cursor: pointer;
   transition: background 0.12s, border-color 0.12s;
 }
+
+.task-item[data-state="running"],
+.task-item[data-state="planning"] { border-left-color: var(--accent); }
+.task-item[data-state="completed"] { border-left-color: var(--ok); }
+.task-item[data-state="failed"] { border-left-color: var(--danger); }
+.task-item[data-state="paused"] { border-left-color: var(--warn); }
+.task-item[data-state="cancelled"] { border-left-color: var(--text-faint); }
 
 .task-item:hover { background: var(--bg-raised); }
 
 .task-item.active {
   background: var(--accent-soft);
   border-color: rgba(91, 124, 250, 0.32);
+  border-left-color: var(--accent);
 }
 
 .task-goal {
@@ -518,13 +530,89 @@ input:focus, textarea:focus {
 }
 
 .turn.assistant .body {
-  white-space: pre-wrap;
   font-size: 14.5px;
   line-height: 1.7;
   color: var(--text);
 }
 
 .turn.assistant .body:empty { display: none; }
+
+/* ----------------------------------------------------------------- rendered
+ *
+ * The assistant's prose arrives as Markdown and is rendered to real elements,
+ * so `pre-wrap` moves from the container onto the leaves. Leaving it on the
+ * container would double every line break. */
+
+.md-p { white-space: pre-wrap; }
+.md-p + .md-p { margin-top: 10px; }
+
+.md-head {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.md-h1 { font-size: 19px; margin: 18px 0 8px; }
+.md-h2 { font-size: 16.5px; margin: 16px 0 7px; }
+.md-h3 { font-size: 15px; margin: 14px 0 6px; }
+.md-h4 { font-size: 14.5px; margin: 12px 0 5px; color: var(--text-dim); }
+.md > .md-head:first-child { margin-top: 0; }
+
+.md-list {
+  margin: 8px 0;
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.md-list li { white-space: pre-wrap; }
+.md-list li::marker { color: var(--text-faint); }
+
+/* Inline and fenced code share a surface, so they read as the same idea at
+   two sizes. The language strip only appears when the model named one -- an
+   empty strip is decoration. */
+.md-code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 1.5px 5px;
+  border-radius: 5px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: #c8d3f0;
+}
+
+.md-pre {
+  margin: 10px 0;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.md-pre code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: #c8d3f0;
+  white-space: pre;
+}
+
+.md-pre code[data-lang]::before {
+  content: attr(data-lang);
+  display: block;
+  margin-bottom: 8px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.md a { color: var(--accent-hover); }
+.md strong { font-weight: 650; color: #fff; }
+.md em { font-style: italic; color: var(--text-dim); }
 
 .turn.error .body {
   padding: 11px 15px;
@@ -598,10 +686,30 @@ input:focus, textarea:focus {
 .tool-args { color: var(--text-faint); background: var(--bg-input); }
 .tool-result { color: var(--text-dim); }
 
+/* The gist sits on the collapsed row and gives up its room first when the row
+   is narrow -- the tool name matters more than the result. */
+.tool-gist {
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+}
+
 .tool.running .tool-mark { color: var(--accent); animation: pulse 1s ease-in-out infinite; }
 .tool.ok .tool-mark { color: var(--ok); }
 .tool.failed .tool-mark { color: var(--danger); }
 .tool.failed .tool-name { color: #f0a5a4; }
+
+/* Only the failure is tinted. Colouring every successful call would turn a
+   run of eight reads into a stripe pattern, and the eye would stop landing on
+   the one that actually needs attention. */
+.tool.failed {
+  border-color: rgba(239, 97, 96, 0.26);
+  background: var(--danger-soft);
+}
 
 /* the plan is a section, not a tool call: it is the agent's own statement of
    what it is about to do, and it stays for the whole run */
