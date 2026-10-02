@@ -18,10 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.agent.execution_identity import ExecutionIdentity, fingerprint, verify
-from unified_agent.agent.state import TaskStatus, replay
-from unified_agent.config import Decision
-from unified_agent.types import EffectClass
+from wukong.agent.execution_identity import ExecutionIdentity, fingerprint, verify
+from wukong.agent.state import TaskStatus, replay
+from wukong.config import Decision
+from wukong.types import EffectClass
 
 
 def quoted(path: Path) -> str:

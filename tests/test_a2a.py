@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 
-from unified_agent.a2a import (
+from wukong.a2a import (
     A2AClient,
     A2AClientError,
     A2AServer,
@@ -32,8 +32,8 @@ from unified_agent.a2a import (
     state_for,
     validate_remote_card,
 )
-from unified_agent.a2a.card import describe_capability_gap
-from unified_agent.agent.state import TaskStatus
+from wukong.a2a.card import describe_capability_gap
+from wukong.agent.state import TaskStatus
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ class TestAgentCard:
         `load_skill` then refuses."""
         from tests.test_skills import write_skill
 
-        from unified_agent.skills.registry import SkillRegistry
+        from wukong.skills.registry import SkillRegistry
 
         authored = tmp_path / "skills"
         candidates = tmp_path / "skills-candidates"
@@ -228,21 +228,21 @@ class TestSSRFGuard:
         """The classic bypass, and the check people skip: the name is on the
         allowlist, the address is not public."""
         monkeypatch.setattr(
-            "unified_agent.a2a.security._resolve", lambda host, port: [address]
+            "wukong.a2a.security._resolve", lambda host, port: [address]
         )
         with pytest.raises(SSRFBlocked, match="private, loopback, link-local or reserved"):
             check_url("https://agent.example.com/x", allow_hosts=["agent.example.com"])
 
     def test_a_public_address_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            "unified_agent.a2a.security._resolve", lambda host, port: ["93.184.216.34"]
+            "wukong.a2a.security._resolve", lambda host, port: ["93.184.216.34"]
         )
         assert check_url("https://agent.example.com/x", allow_hosts=["agent.example.com"])
 
     def test_the_private_escape_hatch_is_explicit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Named so that turning it on is obviously a decision."""
         monkeypatch.setattr(
-            "unified_agent.a2a.security._resolve", lambda host, port: ["127.0.0.1"]
+            "wukong.a2a.security._resolve", lambda host, port: ["127.0.0.1"]
         )
         with pytest.raises(SSRFBlocked):
             check_url("https://lab.local/x", allow_hosts=["lab.local"])
@@ -624,7 +624,7 @@ class TestClient:
             async def request(self, method: str, url: str, **kw: Any) -> Redirect:
                 return Redirect()
 
-        import unified_agent.a2a.client as module
+        import wukong.a2a.client as module
 
         monkeypatch.setattr(module.httpx, "AsyncClient", lambda **kw: FakeClient())
         with pytest.raises(A2AClientError, match="refusing to call"):

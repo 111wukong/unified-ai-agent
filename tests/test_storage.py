@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from unified_agent.observability.events import EventType
-from unified_agent.observability.redact import Redactor
-from unified_agent.storage.store import Store
+from wukong.observability.events import EventType
+from wukong.observability.redact import Redactor
+from wukong.storage.store import Store
 
 
 @pytest.fixture
 def store(tmp_path):  # noqa: ANN001
-    s = Store(tmp_path / "uaa.db")
+    s = Store(tmp_path / "wukong.db")
     yield s
     s.close()
 
@@ -49,7 +49,7 @@ class TestEventLog:
 class TestRedactionAtTheBoundary:
     def test_secrets_are_masked_on_the_way_into_the_store(self, tmp_path) -> None:  # noqa: ANN001
         secret = "sk-live-abcdefghijklmnopqrstuvwxyz"
-        store = Store(tmp_path / "uaa.db", redactor=Redactor([secret]))
+        store = Store(tmp_path / "wukong.db", redactor=Redactor([secret]))
         try:
             sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
             task = store.create_task(session_id=sid, goal="g")
@@ -64,7 +64,7 @@ class TestRedactionAtTheBoundary:
     def test_artifacts_are_redacted_before_being_written(self, tmp_path) -> None:  # noqa: ANN001
         """Offloading a 200 KB tool output is pointless if the key lands on disk."""
         secret = "ghp_" + "a" * 36
-        store = Store(tmp_path / "uaa.db", redactor=Redactor([secret]))
+        store = Store(tmp_path / "wukong.db", redactor=Redactor([secret]))
         try:
             path = store.save_artifact(
                 task_id="t",
@@ -150,7 +150,7 @@ class TestToolCallLedger:
         assert store.tool_call(call_id).status == "ambiguous"
 
     def test_ledger_survives_a_reopen(self, tmp_path) -> None:  # noqa: ANN001
-        path = tmp_path / "uaa.db"
+        path = tmp_path / "wukong.db"
         store = Store(path)
         sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
         task = store.create_task(session_id=sid, goal="g")
@@ -231,7 +231,7 @@ class TestTaskListing:
         assert goals[0] == "third"
 
     def test_listing_can_filter_to_what_is_still_resumable(self, store: Store) -> None:
-        """`uaa task list --resumable`.
+        """`wukong task list --resumable`.
 
         The filter lives on the listing rather than on a point lookup: a list
         view is exactly what the projection is for, while `resume` itself

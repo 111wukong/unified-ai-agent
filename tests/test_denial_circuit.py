@@ -13,8 +13,8 @@ for ever.
 
 from __future__ import annotations
 
-from unified_agent.agent.state import TaskStatus, replay
-from unified_agent.observability.events import EventType
+from wukong.agent.state import TaskStatus, replay
+from wukong.observability.events import EventType
 
 
 def command(text: str) -> dict:

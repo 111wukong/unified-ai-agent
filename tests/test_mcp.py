@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.config import McpServerConfig
-from unified_agent.tools.base import ToolContext
-from unified_agent.tools.mcp import McpStdioClient, McpTool, connect_servers
-from unified_agent.tools.permissions import PermissionEngine
-from unified_agent.tools.registry import ToolRegistry
-from unified_agent.types import EffectClass
+from wukong.config import McpServerConfig
+from wukong.tools.base import ToolContext
+from wukong.tools.mcp import McpStdioClient, McpTool, connect_servers
+from wukong.tools.permissions import PermissionEngine
+from wukong.tools.registry import ToolRegistry
+from wukong.types import EffectClass
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_mcp_server.py"
 
@@ -153,7 +153,7 @@ class TestRegistryIntegration:
 class TestRobustness:
     async def test_missing_command_reports_clearly(self) -> None:
         client = McpStdioClient(McpServerConfig(name="x", command="/nope/missing", args=[]))
-        from unified_agent.errors import ToolError
+        from wukong.errors import ToolError
 
         with pytest.raises(ToolError):
             await client.start()

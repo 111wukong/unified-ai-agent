@@ -1,6 +1,6 @@
 # A workflow is data, and it is checked before it runs: every `{{#node.field#}}`
 # must resolve, every node must be reachable, and the graph must be acyclic.
-# `uaa workflow validate` reports every problem at once, with the location.
+# `wukong workflow validate` reports every problem at once, with the location.
 version: "1"
 name: triage-and-fix
 description: >

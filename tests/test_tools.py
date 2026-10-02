@@ -8,17 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.agent.executor import truncate
-from unified_agent.tools.base import ToolContext, ValidationFailure, validate_against
-from unified_agent.tools.fs import (
+from wukong.agent.executor import truncate
+from wukong.tools.base import ToolContext, ValidationFailure, validate_against
+from wukong.tools.fs import (
     ApplyPatchTool,
     ListDirectoryTool,
     ReadFileTool,
     SearchFilesTool,
     WriteFileTool,
 )
-from unified_agent.tools.shell import RunCommandTool
-from unified_agent.types import EffectClass
+from wukong.tools.shell import RunCommandTool
+from wukong.types import EffectClass
 
 
 @pytest.fixture
@@ -179,7 +179,7 @@ class TestTruncation:
         assert artifacts, "a truncated output must be offloaded"
         assert artifacts[0]["bytes"] > 500
 
-        from unified_agent.agent.state import replay
+        from wukong.agent.state import replay
 
         state = replay(agent.store.events(result.task_id), task_id=result.task_id)
         entry = [e for e in state.log if e.tool == "read_file"][0]
@@ -257,7 +257,7 @@ class TestShellTool:
     ) -> None:  # noqa: ANN001
         monkeypatch.setenv("OPENAI_API_KEY", "sk-should-never-be-visible")
         monkeypatch.setenv("RANDOM_VENDOR_TOKEN", "also-secret")
-        from unified_agent.tools.permissions import scrub_env
+        from wukong.tools.permissions import scrub_env
 
         ctx.env = scrub_env()
         result = await RunCommandTool().run({"command": "env"}, ctx)
@@ -297,24 +297,24 @@ class TestVenvDetection:
     """Without this, `run_tests` is broken for every venv-based project."""
 
     def test_finds_a_dot_venv(self, workspace) -> None:  # noqa: ANN001
-        from unified_agent.tools.shell import find_venv_bin
+        from wukong.tools.shell import find_venv_bin
 
         (workspace / ".venv" / "bin").mkdir(parents=True)
         assert find_venv_bin(workspace) == workspace / ".venv" / "bin"
 
     def test_finds_a_plain_venv(self, workspace) -> None:  # noqa: ANN001
-        from unified_agent.tools.shell import find_venv_bin
+        from wukong.tools.shell import find_venv_bin
 
         (workspace / "venv" / "bin").mkdir(parents=True)
         assert find_venv_bin(workspace) == workspace / "venv" / "bin"
 
     def test_returns_none_without_one(self, workspace) -> None:  # noqa: ANN001
-        from unified_agent.tools.shell import find_venv_bin
+        from wukong.tools.shell import find_venv_bin
 
         assert find_venv_bin(workspace) is None
 
     def test_run_tests_uses_the_venv_pytest(self, workspace) -> None:  # noqa: ANN001
-        from unified_agent.tools.shell import RunTestsTool
+        from wukong.tools.shell import RunTestsTool
 
         (workspace / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
         bin_dir = workspace / ".venv" / "bin"
@@ -325,13 +325,13 @@ class TestVenvDetection:
         assert argv[0] == str(bin_dir / "pytest")
 
     def test_run_tests_falls_back_to_bare_pytest(self, workspace) -> None:  # noqa: ANN001
-        from unified_agent.tools.shell import RunTestsTool
+        from wukong.tools.shell import RunTestsTool
 
         (workspace / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
         assert RunTestsTool().detect(workspace)[0] == "pytest"
 
     def test_venv_is_prepended_to_path_for_subprocesses(self, workspace) -> None:  # noqa: ANN001
-        from unified_agent.tools.shell import _with_venv_on_path
+        from wukong.tools.shell import _with_venv_on_path
 
         bin_dir = workspace / ".venv" / "bin"
         bin_dir.mkdir(parents=True)
@@ -352,7 +352,7 @@ class TestProjectIsImportableDuringTests:
     """
 
     def test_the_workspace_root_and_src_are_added(self, workspace) -> None:  # noqa: ANN001
-        from unified_agent.tools.shell import _with_project_importable
+        from wukong.tools.shell import _with_project_importable
 
         (workspace / "src").mkdir()
         env = _with_project_importable({}, workspace)
@@ -361,7 +361,7 @@ class TestProjectIsImportableDuringTests:
         assert str(workspace / "src") in parts
 
     def test_an_existing_pythonpath_is_kept(self, workspace) -> None:  # noqa: ANN001
-        from unified_agent.tools.shell import _with_project_importable
+        from wukong.tools.shell import _with_project_importable
 
         env = _with_project_importable({"PYTHONPATH": "/elsewhere"}, workspace)
         assert env["PYTHONPATH"].endswith("/elsewhere")
@@ -370,7 +370,7 @@ class TestProjectIsImportableDuringTests:
     def test_a_missing_src_directory_is_not_invented(self, workspace) -> None:  # noqa: ANN001
         """Adding a path that does not exist is harmless but it is noise in
         the environment a subprocess sees."""
-        from unified_agent.tools.shell import _with_project_importable
+        from wukong.tools.shell import _with_project_importable
 
         parts = _with_project_importable({}, workspace)["PYTHONPATH"].split(os.pathsep)
         assert str(workspace) in parts
@@ -384,8 +384,8 @@ class TestProjectIsImportableDuringTests:
         A package at the root, tests in `tests/`, and a test that imports the
         package. Without the import path this fails at collection.
         """
-        from unified_agent.tools.base import ToolContext
-        from unified_agent.tools.shell import RunTestsTool
+        from wukong.tools.base import ToolContext
+        from wukong.tools.shell import RunTestsTool
 
         (workspace / "shop").mkdir()
         (workspace / "shop" / "__init__.py").write_text("VALUE = 41\n", encoding="utf-8")

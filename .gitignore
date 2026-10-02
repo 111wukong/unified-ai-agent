@@ -1,5 +1,5 @@
 # runtime data (never commit: contains task history, memories, artifacts)
-.uaa/
+.wukong/
 *.db
 *.db-wal
 *.db-shm

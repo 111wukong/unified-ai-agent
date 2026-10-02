@@ -12,16 +12,16 @@ from typing import Any, Sequence
 
 import pytest
 
-from unified_agent.agent.factory import build_agent
-from unified_agent.config import (
+from wukong.agent.factory import build_agent
+from wukong.config import (
     AgentConfig,
     ModelSpec,
     NetworkPolicy,
     PermissionConfig,
     Settings,
 )
-from unified_agent.models.mock import MockModel
-from unified_agent.types import Decision, EffectClass
+from wukong.models.mock import MockModel
+from wukong.types import Decision, EffectClass
 
 
 class ScriptedModel(MockModel):

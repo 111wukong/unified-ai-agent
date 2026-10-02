@@ -16,9 +16,9 @@ import json
 
 import pytest
 
-from unified_agent.agent.planner import Planner
-from unified_agent.config import ModelSpec
-from unified_agent.models.mock import MockModel
+from wukong.agent.planner import Planner
+from wukong.config import ModelSpec
+from wukong.models.mock import MockModel
 
 TOOLS = ["read_file", "run_tests", "apply_patch"]
 
@@ -102,8 +102,8 @@ class TestRepairLoop:
         self, settings, session_id: str  # noqa: ANN001
     ) -> None:
         """The loop is only as good as the message it feeds back."""
-        from unified_agent.agent.state import AgentState
-        from unified_agent.types import ModelResponse
+        from wukong.agent.state import AgentState
+        from wukong.types import ModelResponse
 
         seen: list[str] = []
 
@@ -135,9 +135,9 @@ class TestRepairLoop:
     async def test_giving_up_reports_the_last_reason(
         self, settings, session_id: str  # noqa: ANN001
     ) -> None:
-        from unified_agent.agent.state import AgentState
-        from unified_agent.errors import ModelError
-        from unified_agent.types import ModelResponse
+        from wukong.agent.state import AgentState
+        from wukong.errors import ModelError
+        from wukong.types import ModelResponse
 
         class AlwaysBad(MockModel):
             async def chat(self, messages, **kwargs):  # noqa: ANN001, ANN003

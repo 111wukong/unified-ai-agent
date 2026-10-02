@@ -125,7 +125,7 @@ async function main() {
     process.exit(0);
   }
 
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "uaa-shot-"));
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "wukong-shot-"));
   const args = [
     // Without these Chrome cannot start its own sandbox inside a sandboxed
     // environment, and every CDP command then hangs with no error at all.

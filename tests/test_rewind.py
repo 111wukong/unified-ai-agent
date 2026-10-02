@@ -18,10 +18,10 @@ from pathlib import Path
 
 from tests.conftest import ScriptedModel, ScriptedModels
 
-from unified_agent.agent.factory import build_agent
-from unified_agent.agent.rewind import apply_rewind, plan_rewind
-from unified_agent.observability.events import EventType
-from unified_agent.storage.store import Store
+from wukong.agent.factory import build_agent
+from wukong.agent.rewind import apply_rewind, plan_rewind
+from wukong.observability.events import EventType
+from wukong.storage.store import Store
 
 
 async def run_writes(settings, session_id: str, script: list[dict]) -> str:  # noqa: ANN001

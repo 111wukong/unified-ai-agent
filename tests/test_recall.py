@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from unified_agent.storage.store import Store
-from unified_agent.tools.base import ToolContext
-from unified_agent.tools.memory_tools import RecallTool
+from wukong.storage.store import Store
+from wukong.tools.base import ToolContext
+from wukong.tools.memory_tools import RecallTool
 
 
 def seed(store: Store, session: str, goal: str, answer: str, *, parent: str | None = None) -> str:
@@ -166,7 +166,7 @@ class TestRecallTool:
         assert "wording differs" in result.output
 
     async def test_it_is_read_only(self) -> None:
-        from unified_agent.types import EffectClass
+        from wukong.types import EffectClass
 
         assert RecallTool.spec.effect_class is EffectClass.READ_ONLY
         assert RecallTool.spec.idempotent is True

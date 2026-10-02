@@ -20,8 +20,8 @@ outcome is unknown.
 
 Run it with:
 
-    uaa tools | grep count_todos
-    uaa run "how many TODOs are in this project"
+    wukong tools | grep count_todos
+    wukong run "how many TODOs are in this project"
 """
 
 from __future__ import annotations
@@ -32,11 +32,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from unified_agent.agent.factory import build_agent
-from unified_agent.agent.state import AgentState
-from unified_agent.config import load_settings
-from unified_agent.tools.base import Tool, ToolContext, ToolSpec
-from unified_agent.types import EffectClass, ToolResult
+from wukong.agent.factory import build_agent
+from wukong.agent.state import AgentState
+from wukong.config import load_settings
+from wukong.tools.base import Tool, ToolContext, ToolSpec
+from wukong.types import EffectClass, ToolResult
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "dist", "build"}
 _TODO_RE = re.compile(r"\b(TODO|FIXME|XXX|HACK)\b[:\s]*(.*)")

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.orchestration import (
+from wukong.orchestration import (
     ExpressionError,
     NodeType,
     Problem,
@@ -23,7 +23,7 @@ from unified_agent.orchestration import (
     parse_workflow,
     resolve,
 )
-from unified_agent.observability.events import EventType
+from wukong.observability.events import EventType
 
 MINIMAL = """
 version: "1"
@@ -575,7 +575,7 @@ class TestConditions:
 def runner(settings):  # noqa: ANN001
     """A runner over a real agent, with a scripted model."""
     from tests.conftest import ScriptedModel, ScriptedModels
-    from unified_agent.agent.factory import build_agent
+    from wukong.agent.factory import build_agent
 
     created: list = []
 
@@ -686,9 +686,9 @@ class TestExecution:
         assert "workflow_completed" in kinds
 
     def test_the_projection_matches_replay(self, runner) -> None:  # noqa: ANN001
-        """`uaa task list` reads the table; `uaa task show` folds the events.
+        """`wukong task list` reads the table; `wukong task show` folds the events.
         Two sources of truth that disagree is worse than either alone."""
-        from unified_agent.agent.state import replay
+        from wukong.agent.state import replay
 
         engine, agent = runner([{"content": "done"}])
         result = asyncio.run(engine.run(load(LINEAR)))

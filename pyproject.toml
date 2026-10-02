@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "unified-ai-agent"
+name = "wukong"
 version = "0.1.0"
 description = "Local-first AI agent runtime: durable execution, explicit permissions, context budgeting, skill promotion."
 readme = "README.md"
@@ -31,10 +31,10 @@ mcp = ["mcp>=1.0"]
 all = ["fastapi>=0.115", "uvicorn>=0.32", "pywebview>=5.0", "sqlite-vec>=0.1.6"]
 
 [project.scripts]
-uaa = "unified_agent.cli:main"
+wukong = "wukong.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/unified_agent"]
+packages = ["src/wukong"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -51,5 +51,5 @@ select = ["F", "E9", "B"]
 [tool.ruff.lint.per-file-ignores]
 # Typer's entire API is "call a function in the argument default". B008 is
 # not a defect here, it is the framework's documented pattern.
-"src/unified_agent/cli.py" = ["B008"]
+"src/wukong/cli.py" = ["B008"]
 "tests/*" = ["B008"]

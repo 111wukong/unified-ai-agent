@@ -3,7 +3,7 @@
 This file covers one failure mode, and it is the one that is invisible from
 both ends:
 
-* a `Settings` field nobody reads still renders in `uaa config show`, so the
+* a `Settings` field nobody reads still renders in `wukong config show`, so the
   user changes it, sees no error, and believes it took effect;
 * an `EventType` nobody emits still imports and type-checks, so the audit
   trail looks complete while the one thing you need to see is missing.
@@ -25,19 +25,19 @@ import pytest
 
 from tests.conftest import ScriptedModel, ScriptedModels
 
-from unified_agent.agent.factory import build_agent
-from unified_agent.agent.state import replay
-from unified_agent.config import ModelSpec
-from unified_agent.errors import ModelError
-from unified_agent.models.mock import MockModel
-from unified_agent.observability.events import EventType
-from unified_agent.storage.store import Store
-from unified_agent.tools.base import ToolContext
-from unified_agent.tools import net as net_module
-from unified_agent.tools.fs import FS_TOOLS
-from unified_agent.tools.net import HttpGetTool
-from unified_agent.tools.shell import RunCommandTool, build_shell_tools
-from unified_agent.types import EffectClass, idempotency_key
+from wukong.agent.factory import build_agent
+from wukong.agent.state import replay
+from wukong.config import ModelSpec
+from wukong.errors import ModelError
+from wukong.models.mock import MockModel
+from wukong.observability.events import EventType
+from wukong.storage.store import Store
+from wukong.tools.base import ToolContext
+from wukong.tools import net as net_module
+from wukong.tools.fs import FS_TOOLS
+from wukong.tools.net import HttpGetTool
+from wukong.tools.shell import RunCommandTool, build_shell_tools
+from wukong.types import EffectClass, idempotency_key
 
 
 def ctx_for(workspace: Path, home: Path) -> ToolContext:
@@ -206,7 +206,7 @@ class TestVectorLimit:
         assert self._depth(store, monkeypatch, limit=5) == 15
 
     def test_the_service_carries_the_configured_value(self, settings) -> None:  # noqa: ANN001
-        from unified_agent.memory import build_memory_service
+        from wukong.memory import build_memory_service
 
         store = Store(settings.db_path)
         service = build_memory_service(settings=settings, store=store, model=None)
@@ -255,7 +255,7 @@ class TestModelEvents:
         async def no_sleep(_seconds: float) -> None:
             return None
 
-        monkeypatch.setattr("unified_agent.agent.runtime.asyncio.sleep", no_sleep)
+        monkeypatch.setattr("wukong.agent.runtime.asyncio.sleep", no_sleep)
 
         model = _FailingModel(settings.models["scripted"], failures=1, retryable=True)
         agent = await build_agent(settings=settings, models=ScriptedModels(model))
@@ -449,7 +449,7 @@ class TestCapabilityMatrix:
     """
 
     def test_vision_was_removed_rather_than_left_dangling(self, settings) -> None:  # noqa: ANN001
-        from unified_agent.models.base import ModelCapabilities
+        from wukong.models.base import ModelCapabilities
 
         assert "vision" not in ModelCapabilities.model_fields
         caps = ModelCapabilities()
@@ -464,8 +464,8 @@ class TestCapabilityMatrix:
         mode is a provider 400 in the middle of a task, so the request is
         clamped instead.
         """
-        from unified_agent.models.base import ChatModel, ModelCapabilities
-        from unified_agent.types import ModelResponse
+        from wukong.models.base import ChatModel, ModelCapabilities
+        from wukong.types import ModelResponse
 
         class Recording(ChatModel):
             provider = "recording"
@@ -490,7 +490,7 @@ class TestCapabilityMatrix:
 
     def test_parallel_tool_calls_reaches_the_wire(self) -> None:
         """The flag is what a user override actually changes."""
-        from unified_agent.models.openai_compat import OpenAICompatModel
+        from wukong.models.openai_compat import OpenAICompatModel
 
         captured: dict[str, Any] = {}
 
@@ -513,7 +513,7 @@ class TestCapabilityMatrix:
                 captured.update(json)
                 return FakeResponse()
 
-        import unified_agent.models.openai_compat as module
+        import wukong.models.openai_compat as module
 
         original = module.httpx.AsyncClient
         module.httpx.AsyncClient = lambda **kw: FakeClient()  # type: ignore[assignment]
@@ -550,7 +550,7 @@ class TestReadOnlyStore:
     def test_a_read_only_store_refuses_to_write(self, tmp_path: Path) -> None:
         import sqlite3
 
-        path = tmp_path / "uaa.db"
+        path = tmp_path / "wukong.db"
         writable = Store(path)
         writable.close()
 
@@ -569,7 +569,7 @@ class TestReadOnlyStore:
         A read-only connection cannot create the file, so `readonly` falls
         back to a normal open when it is absent.
         """
-        path = tmp_path / "fresh" / "uaa.db"
+        path = tmp_path / "fresh" / "wukong.db"
         store = Store.readonly(path)
         try:
             assert store.list_tasks() == []
@@ -587,8 +587,8 @@ class TestToolInventoryFilter:
     def test_describe_can_filter_to_one_effect_class(self) -> None:
         """Reviewing the permission surface means asking "what can this
         runtime execute", not scanning the whole catalogue."""
-        from unified_agent.tools.registry import ToolRegistry
-        from unified_agent.tools.shell import RunCommandTool
+        from wukong.tools.registry import ToolRegistry
+        from wukong.tools.shell import RunCommandTool
 
         registry = ToolRegistry()
         registry.register(RunCommandTool())
@@ -613,7 +613,7 @@ class TestVectorMaintenance:
         """Vectors built under a previous embedding model are invisible to
         search, so changing `memory.embedding_model` silently narrows
         retrieval to whatever was indexed since."""
-        from unified_agent.memory import build_memory_service
+        from wukong.memory import build_memory_service
 
         store = Store(settings.db_path)
         try:
@@ -653,7 +653,7 @@ class TestProjectionHealth:
         project claims the projection is a cache that is wrong by
         construction if it disagrees. A claim nothing checks is not a claim.
         """
-        from unified_agent.cli import _store_health
+        from wukong.cli import _store_health
 
         agent, _ = await scripted([{"content": "done"}])
         session = agent.store.ensure_session(

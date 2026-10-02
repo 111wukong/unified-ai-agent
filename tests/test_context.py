@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from unified_agent.agent.context import ContextBuilder, _digest
-from unified_agent.agent.state import AgentState, LogEntry, PlanStep, TaskStatus
-from unified_agent.config import AgentConfig, ModelSpec, Settings
-from unified_agent.models.base import estimate_tokens
-from unified_agent.models.mock import MockModel
-from unified_agent.observability.events import EventType
+from wukong.agent.context import ContextBuilder, _digest
+from wukong.agent.state import AgentState, LogEntry, PlanStep, TaskStatus
+from wukong.config import AgentConfig, ModelSpec, Settings
+from wukong.models.base import estimate_tokens
+from wukong.models.mock import MockModel
+from wukong.observability.events import EventType
 
 from tests.conftest import looping_script
 
@@ -48,7 +48,7 @@ class TestBudget:
 
 
 def _model_for(settings):  # noqa: ANN001
-    from unified_agent.models.mock import MockModel
+    from wukong.models.mock import MockModel
 
     return MockModel(settings.models["scripted"])
 
@@ -144,7 +144,7 @@ class TestCompaction:
         compacted = [e for e in events if e.type is EventType.CONTEXT_COMPACTED]
         assert compacted, "compaction should have fired"
 
-        from unified_agent.agent.state import replay
+        from wukong.agent.state import replay
 
         state = replay(events, task_id=result.task_id)
         assert state.compacted_summary
@@ -204,7 +204,7 @@ class TestCompaction:
         agent.settings.agent.max_tokens = 4_000
         await agent.runtime.run("read it", session_id=session_id)
 
-        from unified_agent.agent.state import replay
+        from wukong.agent.state import replay
 
         events = agent.store.events(agent.store.list_tasks(limit=1)[0]["id"])
         state = replay(events, task_id=agent.store.list_tasks(limit=1)[0]["id"])
@@ -237,7 +237,7 @@ class TestCompaction:
 
         result = await agent.runtime.run("read it", session_id=session_id)
         assert result.status == TaskStatus.COMPLETED.value
-        from unified_agent.agent.state import replay
+        from wukong.agent.state import replay
 
         state = replay(agent.store.events(result.task_id), task_id=result.task_id)
         assert state.compacted_summary
@@ -341,7 +341,7 @@ class TestOldEntriesKeepTheirHead:
 
 def _builder(*, keep: int) -> ContextBuilder:
     spec = ModelSpec(provider="mock", model="mock-react")
-    settings = Settings(home=Path("/tmp/uaa-ctx-home"), workspace=Path("/tmp/uaa-ctx-ws"))
+    settings = Settings(home=Path("/tmp/wukong-ctx-home"), workspace=Path("/tmp/wukong-ctx-ws"))
     settings.agent = AgentConfig(keep_recent_observations=keep)
     return ContextBuilder(
         settings=settings, model=MockModel(spec), tool_catalog="", summarizer=None

@@ -9,7 +9,7 @@ things the published orchestrator-worker guidance says make it work:
 * sub-agents cannot write, so they cannot trample each other.
 
 Plus the one property that makes this worth having at all: a sub-agent is a
-real child task, so `uaa task events <child_id>` shows what it did and its
+real child task, so `wukong task events <child_id>` shows what it did and its
 budget is its own.
 """
 
@@ -23,23 +23,23 @@ import pytest
 
 from tests.conftest import ScriptedModel
 
-from unified_agent.agent.factory import build_agent
-from unified_agent.agent.runtime import AgentRuntime
-from unified_agent.config import ModelSpec
-from unified_agent.errors import ModelError
-from unified_agent.models.mock import MockModel
-from unified_agent.observability.events import EventType
-from unified_agent.orchestration.multi_agent import (
+from wukong.agent.factory import build_agent
+from wukong.agent.runtime import AgentRuntime
+from wukong.config import ModelSpec
+from wukong.errors import ModelError
+from wukong.models.mock import MockModel
+from wukong.observability.events import EventType
+from wukong.orchestration.multi_agent import (
     AgentDeps,
     MultiAgentRunner,
     SubAgentTask,
     build_tasks,
     summarize,
 )
-from unified_agent.storage.store import Store
-from unified_agent.tools.base import ToolContext
-from unified_agent.tools.multi_agent import DelegateTool, build_multi_agent_tools, strongest_effect
-from unified_agent.types import EffectClass
+from wukong.storage.store import Store
+from wukong.tools.base import ToolContext
+from wukong.tools.multi_agent import DelegateTool, build_multi_agent_tools, strongest_effect
+from wukong.types import EffectClass
 
 
 def task(**overrides: Any) -> SubAgentTask:
@@ -204,7 +204,7 @@ class TestToolSurface:
 
 class TestBriefRendering:
     def test_the_brief_carries_all_four_parts(self) -> None:
-        rendered = task(guidance="Start from src/unified_agent/agent/").render()
+        rendered = task(guidance="Start from src/wukong/agent/").render()
 
         assert "Find every place the retry budget is read." in rendered
         assert "## Output format" in rendered
@@ -224,7 +224,7 @@ class TestBriefRendering:
 
 class TestSummary:
     def test_the_summary_names_the_report_path_not_the_body(self) -> None:
-        from unified_agent.orchestration.multi_agent import SubAgentOutcome
+        from wukong.orchestration.multi_agent import SubAgentOutcome
 
         outcome = SubAgentOutcome(
             index=0,
@@ -242,7 +242,7 @@ class TestSummary:
         assert "Do not delegate the same question again" in text
 
     def test_a_blocked_sub_agent_says_which_task_to_approve(self) -> None:
-        from unified_agent.orchestration.multi_agent import SubAgentOutcome
+        from wukong.orchestration.multi_agent import SubAgentOutcome
 
         outcome = SubAgentOutcome(
             index=0,

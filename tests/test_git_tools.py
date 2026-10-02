@@ -7,17 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.tools.base import ToolContext
-from unified_agent.tools.git import (
+from wukong.tools.base import ToolContext
+from wukong.tools.git import (
     GitCommitTool,
     GitDiffTool,
     GitLogTool,
     GitStatusTool,
     build_git_tools,
 )
-from unified_agent.tools.permissions import PermissionEngine
-from unified_agent.tools.registry import ToolRegistry
-from unified_agent.types import EffectClass
+from wukong.tools.permissions import PermissionEngine
+from wukong.tools.registry import ToolRegistry
+from wukong.types import EffectClass
 
 
 @pytest.fixture
@@ -100,7 +100,7 @@ class TestReadOnlyTools:
         """
         import tempfile
 
-        outside = Path(tempfile.mkdtemp(prefix="uaa-not-a-repo-"))
+        outside = Path(tempfile.mkdtemp(prefix="wukong-not-a-repo-"))
         plain = ToolContext(
             task_id="t",
             session_id="s",

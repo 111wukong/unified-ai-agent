@@ -1,0 +1,879 @@
+/* wukong console.
+ *
+ * One stylesheet, no build step, no framework. The palette is a small set of
+ * custom properties so a change of mind is a change in one place.
+ *
+ * The rules this follows, in order of how much they matter:
+ *
+ *   1. **Content sits in a centred column.** A transcript that spans the full
+ *      width of a 1440px window produces 200-character lines and reads like a
+ *      log file. The column is the single biggest thing that makes a chat UI
+ *      look considered rather than assembled.
+ *   2. Elevation comes from background steps, not shadows. A shadow is
+ *      invisible on a dark UI; a lighter panel is not.
+ *   3. One accent, used for the one primary action and nothing else.
+ *   4. Monospace is for identifiers and output, never for prose.
+ *   5. Borders are 1px and low-contrast. They separate, they do not decorate.
+ *   6. Every interactive thing has a visible hover, active and focus state.
+ *      A control whose state you cannot see is a control you will not trust.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* surfaces, darkest to lightest */
+  --bg: #0a0b0f;
+  --bg-panel: #101218;
+  --bg-raised: #16191f;
+  --bg-hover: #1c2029;
+  /* Recessed, not raised. On a dark UI "input" reads as a well you type into,
+     and a well is darker than the surface around it -- the same direction as
+     light, not the opposite. Getting this backwards is why a form looks
+     pasted on. */
+  --bg-input: #0b0d12;
+
+  /* Three tiers, because one border cannot do two jobs.
+     `--border` separates things that are already distinct (decorative).
+     `--border-strong` is for hover and dividers.
+     `--border-control` outlines something you have to be able to find and
+     click: at 3.16:1 on the panel it meets WCAG 1.4.11, where the decorative
+     tier sits at 1.45:1 and would fail it. */
+  --border: #1e222b;
+  --border-strong: #2b303c;
+  --border-control: #5a6377;
+
+  --text: #e9ebef;
+  --text-dim: #9aa1b0;
+  --text-faint: #676e7e;
+
+  --accent: #5b7cfa;
+  --accent-hover: #7492ff;
+  --accent-soft: rgba(91, 124, 250, 0.14);
+
+  --ok: #40c98b;
+  --ok-soft: rgba(64, 201, 139, 0.13);
+  --warn: #dfa43c;
+  --warn-soft: rgba(223, 164, 60, 0.13);
+  --danger: #ef6160;
+  --danger-soft: rgba(239, 97, 96, 0.13);
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  /* the reading column: prose, cards, the composer and the approval panel all
+     line up on this, which is what makes the page look like one thing */
+  --column: 780px;
+
+  /* Latin first, then the Chinese family -- but the Chinese family is not a
+     fallback here, it is what most of the text will actually render in.
+     `PingFang SC` is the macOS default and is what makes a Chinese interface
+     look native rather than like a translated English one; the rest are the
+     Windows and Linux equivalents. HarmonyOS Sans is first because it has the
+     most even weight across the CJK block. */
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "HarmonyOS Sans SC", "Hiragino Sans GB", "Microsoft YaHei UI",
+    "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", Roboto,
+    sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "PingFang SC", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  /* 1.7 rather than 1.55: hanzi fill their em box, so the same leading that
+     looks right for Latin looks cramped for Chinese. */
+  font: 400 14px/1.7 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 288px minmax(0, 1fr);
+  height: 100vh;
+}
+
+/* ---------------------------------------------------------------- sidebar */
+
+#sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 18px 18px 16px;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex: none;
+}
+
+.brand-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+
+.brand-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.brand-version { font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
+
+.panel {
+  padding: 14px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.panel + .panel { border-top: 1px solid var(--border); }
+.panel-grow { flex: 1; min-height: 0; }
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0;
+  /* No letter-spacing and no uppercase: both are Latin devices. Tracking
+     pushes hanzi apart, which reads as broken spacing rather than as
+     emphasis, and `text-transform` does nothing to Chinese at all. Weight and
+     colour carry the hierarchy instead. */
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.panel-count { font-family: var(--mono); font-size: 11px; letter-spacing: 0; }
+
+.field { display: flex; flex-direction: column; gap: 7px; }
+
+.field-label { font-size: 12px; color: var(--text-dim); }
+
+input[type="text"], #model, textarea {
+  width: 100%;
+  padding: 8px 11px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+input:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.hint { margin: 0; font-size: 11.5px; color: var(--text-faint); line-height: 1.55; }
+
+.hint code {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+}
+
+/* pre-approve: toggles, not a native multi-select. A list box where you have
+   to know that ctrl-click means "add" is a control that hides its own state. */
+
+.toggles { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.toggle {
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.toggle:hover { background: var(--bg-hover); color: var(--text); }
+
+.toggle[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ----------------------------------------------------------------- sandbox */
+
+.sandbox { display: flex; flex-direction: column; gap: 9px; font-size: 12px; }
+
+.sandbox-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sandbox-key { color: var(--text-faint); }
+.sandbox-val { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+
+.sandbox-alert {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  border: 1px solid rgba(223, 164, 60, 0.2);
+  color: #e6c98f;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+/* the full explanation is available, not in the way */
+.sandbox-why { font-size: 11.5px; }
+
+.sandbox-why summary {
+  cursor: pointer;
+  color: var(--text-faint);
+  list-style: none;
+  user-select: none;
+  padding: 2px 0;
+}
+
+.sandbox-why summary::-webkit-details-marker { display: none; }
+.sandbox-why summary::before { content: "▸ "; }
+.sandbox-why[open] summary::before { content: "▾ "; }
+.sandbox-why summary:hover { color: var(--text-dim); }
+
+.sandbox-why ul {
+  margin: 6px 0 0;
+  padding: 9px 11px 9px 24px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+
+.sandbox-why li + li { margin-top: 6px; }
+
+.skeleton {
+  display: block;
+  height: 12px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--bg-raised) 25%, var(--bg-hover) 37%, var(--bg-raised) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: 0 0; }
+}
+
+/* ------------------------------------------------------------------- tasks */
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;
+  min-height: 0;
+  margin: 0 -8px;
+  padding: 0 8px;
+}
+
+.task-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.task-item:hover { background: var(--bg-raised); }
+
+.task-item.active {
+  background: var(--accent-soft);
+  border-color: rgba(91, 124, 250, 0.32);
+}
+
+.task-goal {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.task-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+
+.task-empty { padding: 12px 4px; font-size: 12px; color: var(--text-faint); }
+
+.sidebar-footer {
+  display: flex;
+  gap: 16px;
+  padding: 13px 18px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+}
+
+.sidebar-footer a { color: var(--text-faint); text-decoration: none; }
+.sidebar-footer a:hover { color: var(--accent-hover); }
+
+/* -------------------------------------------------------------------- main */
+
+#main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* A header gives the page a top edge. Without it the content floated in the
+   middle of a dark rectangle with nothing to anchor it. */
+
+#topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex: none;
+}
+
+.topbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+
+.topbar-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* the reading column */
+
+#transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  /* Content sits against the composer rather than floating at the top of an
+     empty pane. This is what every chat interface does, and it is why a short
+     conversation does not look like a broken page. */
+  justify-content: flex-end;
+}
+
+#transcript > * {
+  width: 100%;
+  max-width: var(--column);
+  margin-inline: auto;
+  flex: none;
+}
+
+/* empty state: a blank pane reads as broken. Say what the thing is for. */
+
+.empty {
+  margin: auto;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 32px 0;
+}
+
+.empty.hidden { display: none; }
+
+.empty-mark {
+  display: grid;
+  place-items: center;
+  width: 50px;
+  height: 50px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+
+.empty-title { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+
+.empty-body {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  max-width: 420px;
+}
+
+.empty-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+.example {
+  padding: 7px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.example:hover { background: var(--bg-hover); color: var(--text); border-color: var(--accent); }
+
+/* ------------------------------------------------------------------- turns */
+
+.turn { display: flex; flex-direction: column; gap: 9px; animation: rise 0.18s ease-out; }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* the one animation that carries meaning: something is still happening */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+.turn-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.turn.user .turn-head { color: var(--accent); }
+.turn.error .turn-head { color: var(--danger); }
+
+/* the user's own words, set apart from the agent's */
+.turn.user .body {
+  padding: 11px 15px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  white-space: pre-wrap;
+  font-size: 14px;
+}
+
+.turn.assistant .body {
+  white-space: pre-wrap;
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.turn.assistant .body:empty { display: none; }
+
+.turn.error .body {
+  padding: 11px 15px;
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+  border: 1px solid rgba(239, 97, 96, 0.26);
+  color: #f0a5a4;
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+/* A tool call is one line until you open it.
+ *
+ * Collapsed, a call reads as a row in a list -- what it acted on, and whether
+ * it worked. Only the call you open becomes a card. Showing every call as a
+ * card with its arguments visible meant a run of eight file reads took eight
+ * screens, which reads like a log file rather than a tool. */
+
+.tool {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  overflow: hidden;
+  font-size: 12px;
+}
+
+.tool[open] { background: var(--bg-panel); border-color: var(--border); }
+
+.tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+}
+
+.tool-head::-webkit-details-marker { display: none; }
+.tool-head:hover { background: var(--bg-raised); color: var(--text); }
+
+.tool-mark { width: 12px; flex: none; text-align: center; color: var(--text-faint); }
+.tool-name { color: var(--text); flex: none; }
+
+.tool-arg {
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-args,
+.tool-result {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.tool-args { color: var(--text-faint); background: var(--bg-input); }
+.tool-result { color: var(--text-dim); }
+
+.tool.running .tool-mark { color: var(--accent); animation: pulse 1s ease-in-out infinite; }
+.tool.ok .tool-mark { color: var(--ok); }
+.tool.failed .tool-mark { color: var(--danger); }
+.tool.failed .tool-name { color: #f0a5a4; }
+
+/* the plan is a section, not a tool call: it is the agent's own statement of
+   what it is about to do, and it stays for the whole run */
+
+.plan-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  padding: 12px 14px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.plan-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.plan { display: flex; flex-direction: column; gap: 1px; }
+
+.plan-step {
+  display: grid;
+  grid-template-columns: 16px 18px 1fr;
+  align-items: baseline;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--text-dim);
+  padding: 4px 0;
+}
+
+.plan-step .mark { font-size: 10px; text-align: center; color: var(--text-faint); }
+.plan-step .num { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+
+.plan-step.completed { color: var(--text); }
+.plan-step.completed .mark { color: var(--ok); }
+
+.plan-step.running { color: var(--text); }
+.plan-step.running .mark { color: var(--accent); animation: pulse 1s ease-in-out infinite; }
+
+.plan-step.failed { color: #f0a5a4; }
+.plan-step.failed .mark { color: var(--danger); }
+
+.plan-step.skipped { opacity: 0.55; }
+
+/* ------------------------------------------------------------------- chips */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  text-transform: none;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.chip-ok { background: var(--ok-soft); border-color: rgba(64, 201, 139, 0.28); color: var(--ok); }
+.chip-warn { background: var(--warn-soft); border-color: rgba(223, 164, 60, 0.3); color: var(--warn); }
+.chip-danger { background: var(--danger-soft); border-color: rgba(239, 97, 96, 0.3); color: var(--danger); }
+.chip-accent { background: var(--accent-soft); border-color: rgba(91, 124, 250, 0.3); color: var(--accent-hover); }
+
+.dim { color: var(--text-faint); font-size: 12px; }
+
+/* ---------------------------------------------------------------- approval */
+
+.approval {
+  width: 100%;
+  max-width: var(--column);
+  margin: 0 auto 14px;
+  border: 1px solid rgba(223, 164, 60, 0.32);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(223, 164, 60, 0.08), rgba(223, 164, 60, 0.02));
+  overflow: hidden;
+  flex: none;
+  animation: rise 0.18s ease-out;
+}
+
+.approval.hidden { display: none; }
+
+.approval-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 15px;
+  border-bottom: 1px solid rgba(223, 164, 60, 0.2);
+  font-size: 13.5px;
+}
+
+.approval-icon { display: grid; place-items: center; color: var(--warn); }
+
+.approval-head strong { font-weight: 600; }
+.approval-head .chip { margin-left: auto; }
+
+.approval pre {
+  margin: 0;
+  padding: 13px 15px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.approval-detail {
+  padding: 0 15px 13px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  padding: 13px 15px;
+  border-top: 1px solid rgba(223, 164, 60, 0.2);
+  background: rgba(0, 0, 0, 0.16);
+}
+
+/* ---------------------------------------------------------------- composer */
+
+#composer {
+  width: 100%;
+  max-width: var(--column);
+  margin: 0 auto;
+  padding: 0 0 24px;
+  flex: none;
+}
+
+.composer-box {
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.composer-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+#goal {
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: 14px 16px 4px;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  resize: none;
+  min-height: 46px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+#goal:focus { box-shadow: none; border: none; }
+
+/* Let the browser size the textarea to its content where it can. The script
+ * falls back to measuring `scrollHeight`, and skips itself when this applies
+ * so the two do not fight over the height. */
+@supports (field-sizing: content) {
+  #goal { field-sizing: content; }
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 13px 11px 16px;
+}
+
+.composer-hint { font-size: 11px; color: var(--text-faint); margin-left: auto; }
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+
+.status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.status.busy { color: var(--accent-hover); }
+.status.busy::before { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+
+.status[data-state="completed"] { color: var(--ok); }
+.status[data-state="completed"]::before { background: var(--ok); }
+
+.status[data-state="failed"],
+.status[data-state="cancelled"] { color: var(--danger); }
+.status[data-state="failed"]::before,
+.status[data-state="cancelled"]::before { background: var(--danger); }
+
+.status[data-state="waiting_confirmation"] { color: var(--warn); }
+.status[data-state="waiting_confirmation"]::before { background: var(--warn); }
+
+/* ----------------------------------------------------------------- buttons */
+
+.btn {
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s, opacity 0.12s;
+}
+
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent-hover); }
+
+.btn-danger {
+  background: var(--danger-soft);
+  border-color: rgba(239, 97, 96, 0.32);
+  color: #f0a5a4;
+}
+.btn-danger:hover { background: rgba(239, 97, 96, 0.2); color: #ffcac9; }
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border-control);
+  color: var(--text-dim);
+}
+.btn-ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* --------------------------------------------------------------- scrollbar */
+
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: #3a4150; background-clip: content-box; }
+
+/* --------------------------------------------------------------- responsive */
+
+@media (max-width: 980px) {
+  #app { grid-template-columns: 1fr; }
+  #sidebar { display: none; }
+  #transcript { padding: 20px 16px; }
+  #topbar { padding: 12px 16px; }
+  #composer { padding: 0 16px 16px; }
+  .approval { margin-bottom: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

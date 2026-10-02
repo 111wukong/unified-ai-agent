@@ -15,9 +15,9 @@ the questions that status does not:
 
 Usage
 -----
-    python scripts/audit-task.py --home /tmp/uaa-live                 # every task
-    python scripts/audit-task.py --home /tmp/uaa-live task_abc123     # one task
-    python scripts/audit-task.py --home /tmp/uaa-live --json          # machine-readable
+    python scripts/audit-task.py --home /tmp/wukong-live                 # every task
+    python scripts/audit-task.py --home /tmp/wukong-live task_abc123     # one task
+    python scripts/audit-task.py --home /tmp/wukong-live --json          # machine-readable
 
 Exit code is 1 when any audited task shows a finding, so this can gate a run.
 """
@@ -32,8 +32,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from unified_agent.config import load_settings  # noqa: E402
-from unified_agent.storage.store import Store  # noqa: E402
+from wukong.config import load_settings  # noqa: E402
+from wukong.storage.store import Store  # noqa: E402
 
 #: Tools that cannot change the world. A run made only of these read the
 #: repository and stopped -- it did not do the task. Used only as a hint;
@@ -250,7 +250,7 @@ def render(report: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("task_ids", nargs="*", help="task ids; default is all recent tasks")
-    parser.add_argument("--home", default=None, help="config dir (default ~/.uaa)")
+    parser.add_argument("--home", default=None, help="config dir (default ~/.wukong)")
     parser.add_argument("--limit", type=int, default=20, help="how many tasks to audit")
     parser.add_argument("--json", action="store_true", help="emit JSON")
     args = parser.parse_args()

@@ -4,7 +4,7 @@ description: Summarise an unfamiliar codebase. Use when the user asks what a pro
 license: MIT
 allowed-tools: read_file list_directory search_files file_info
 metadata:
-  author: unified-ai-agent
+  author: wukong
   version: "1.0"
 ---
 

@@ -13,14 +13,14 @@ from __future__ import annotations
 
 import pytest
 
-from unified_agent.config import ModelSpec
-from unified_agent.models.credentials import (
+from wukong.config import ModelSpec
+from wukong.models.credentials import (
     PERMANENT,
     CredentialPool,
     classify_failure,
     explain,
 )
-from unified_agent.models.openai_compat import OpenAICompatModel
+from wukong.models.openai_compat import OpenAICompatModel
 
 
 class TestClassification:
@@ -175,7 +175,7 @@ class TestAdapterRefusal:
         assert model.pool.credentials[0].failure_reason == "billing"
         assert model.pool.usable() == []
 
-    def test_the_pool_reports_what_uaa_doctor_would_show(self, monkeypatch) -> None:  # noqa: ANN001
+    def test_the_pool_reports_what_wukong_doctor_would_show(self, monkeypatch) -> None:  # noqa: ANN001
         monkeypatch.setenv("PRIMARY", "sk-primary-key-0001")
         monkeypatch.setenv("BACKUP", "sk-backup-key-0002")
         spec = ModelSpec(provider="openai_compat", api_key_env="PRIMARY", api_key_envs=["BACKUP"])

@@ -1,25 +1,25 @@
-# unified-ai-agent
+# wukong
 
-[![CI](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/unified-ai-agent/actions/workflows/ci.yml)
-[![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/unified-ai-agent)
-[![tests](https://img.shields.io/badge/tests-730%20offline-brightgreen)](https://github.com/111wukong/unified-ai-agent)
+[![CI](https://github.com/111wukong/wukong/actions/workflows/ci.yml/badge.svg)](https://github.com/111wukong/wukong/actions/workflows/ci.yml)
+[![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/111wukong/wukong)
+[![tests](https://img.shields.io/badge/tests-730%20offline-brightgreen)](https://github.com/111wukong/wukong)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 一个本地优先的通用 AI Agent 运行时。Python 3.11+，SQLite，无外部服务依赖。
 
 ```bash
-uaa init
-uaa run --model mock "查看当前目录下的 Python 文件并总结"   # 离线，不需要任何 API key
-uaa run "分析认证模块并补充测试"                            # 用真实模型
-uaa run --multi-agent "对比这五个模块的设计取舍"            # 显式开启子 Agent 扇出
-uaa serve                                                   # HTTP + WebSocket + Web 控制台
-uaa a2a card                                                # 会发布的 Agent Card
-uaa a2a call https://partner.example.com "summarise this"    # 调另一个 Agent（默认不允许）
-uaa desktop                                                 # 原生桌面窗口
-uaa desktop --bundle                                        # 打成可双击的 .app
-uaa sandbox                                                 # 报告进程隔离实际是否生效
-uaa skill list                                              # 技能，含等待人工审核的候选
-uaa task rewind <task_id>                                   # 预览：还原这个任务改过的文件
+wukong init
+wukong run --model mock "查看当前目录下的 Python 文件并总结"   # 离线，不需要任何 API key
+wukong run "分析认证模块并补充测试"                            # 用真实模型
+wukong run --multi-agent "对比这五个模块的设计取舍"            # 显式开启子 Agent 扇出
+wukong serve                                                   # HTTP + WebSocket + Web 控制台
+wukong a2a card                                                # 会发布的 Agent Card
+wukong a2a call https://partner.example.com "summarise this"    # 调另一个 Agent（默认不允许）
+wukong desktop                                                 # 原生桌面窗口
+wukong desktop --bundle                                        # 打成可双击的 .app
+wukong sandbox                                                 # 报告进程隔离实际是否生效
+wukong skill list                                              # 技能，含等待人工审核的候选
+wukong task rewind <task_id>                                   # 预览：还原这个任务改过的文件
 ```
 
 ---
@@ -53,18 +53,18 @@ CrewAI 的强项是角色化的人体工学，LangGraph 的强项是有类型的
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/uaa init
-.venv/bin/uaa doctor          # 检查环境、密钥、权限策略
-.venv/bin/uaa tools           # 列出工具及其权限等级
-.venv/bin/uaa demo            # 离线端到端演示
+.venv/bin/wukong init
+.venv/bin/wukong doctor          # 检查环境、密钥、权限策略
+.venv/bin/wukong tools           # 列出工具及其权限等级
+.venv/bin/wukong demo            # 离线端到端演示
 ```
 
 配置模型（任意 OpenAI 兼容端点：OpenAI / DeepSeek / 通义千问 / Ollama / LM Studio / vLLM）：
 
 ```bash
 export DEEPSEEK_API_KEY=sk-...
-.venv/bin/uaa config set default_model deepseek
-.venv/bin/uaa run "找出所有 TODO 并分类"
+.venv/bin/wukong config set default_model deepseek
+.venv/bin/wukong run "找出所有 TODO 并分类"
 ```
 
 ---
@@ -78,8 +78,8 @@ export DEEPSEEK_API_KEY=sk-...
 好处：不可能「恢复到一个从未存在过的状态」。这是事件溯源在 Agent 上最实际的收益。
 
 ```bash
-uaa task events <task_id>   # 看真相
-uaa task show <task_id>     # 看投影
+wukong task events <task_id>   # 看真相
+wukong task show <task_id>     # 看投影
 ```
 
 ### 2. 工具台账是写前的
@@ -117,8 +117,8 @@ unfinished = self.store.unfinished_calls(state.task_id)
 3. **子进程环境不继承。** `run_command` 拿到的是**白名单**环境（不是黑名单 —— 猜不到名字的 `DASHSCOPE_KEY_ID` 会漏），所以 `env` / `printenv` 偷不走运行时手里的 API key。
 
 ```bash
-uaa run "..." --approve execute_local      # 预授权某一档
-uaa run "..." --yes                        # 除 system_admin 全放行
+wukong run "..." --approve execute_local      # 预授权某一档
+wukong run "..." --yes                        # 除 system_admin 全放行
 ```
 
 ### 5. 技能优先于 Prompt 堆积
@@ -136,15 +136,15 @@ candidate → validated → approved → active → deprecated
 状态来源有明确优先级：**数据库行 > frontmatter 的 `metadata.status` > 目录默认值**。数据库行排在前面，因为只有 `promote` 会写它，而 `promote` 是人的动作。
 
 ```bash
-uaa skill list                              # 含等待审核的候选
-uaa skill review deploy-check               # 安全审查 + 它自己写的审核清单
-uaa skill promote deploy-check validated    # 一次一档，跳级被拒
-uaa skill runs deploy-check                 # 这个技能到底有没有用
+wukong skill list                              # 含等待审核的候选
+wukong skill review deploy-check               # 安全审查 + 它自己写的审核清单
+wukong skill promote deploy-check validated    # 一次一档，跳级被拒
+wukong skill runs deploy-check                 # 这个技能到底有没有用
 ```
 
 三件让这个阶梯不只是摆设的事：
 
-1. **候选目录也在扫描范围内。** Agent 自己写的技能落在 `$UAA_HOME/skills-candidates/`。以前这个目录**不被扫描** —— 那确实让它无法执行，但也让它**不可见**，于是「人工闸门」没有任何东西可以闸，因为没人看得见待审的东西。
+1. **候选目录也在扫描范围内。** Agent 自己写的技能落在 `$WUKONG_HOME/skills-candidates/`。以前这个目录**不被扫描** —— 那确实让它无法执行，但也让它**不可见**，于是「人工闸门」没有任何东西可以闸，因为没人看得见待审的东西。
 2. **候选无法自我提权。** 候选目录是 Agent 唯一能写的目录，所以那里的文件**无论自称什么状态都是 `candidate`**。把 `metadata.status` 改成 `active` 不会让它变成 active —— 阶梯才是权威，不是文件。
 3. **每次加载技能都记一笔账。** `skill_runs` 记录哪个任务加载了哪个技能、结局如何。这是 `deprecate` 唯一的证据来源；没有它，退役一个技能只能凭感觉。
 
@@ -169,13 +169,13 @@ class ModelCapabilities:
 ## 配置：读-改-写，所以序列化必须全量
 
 ```bash
-uaa config set agent.max_steps 12
-uaa config set multi_agent.enabled true
-uaa config set permissions.network.max_response_bytes 500000
-uaa config show
+wukong config set agent.max_steps 12
+wukong config set multi_agent.enabled true
+wukong config set permissions.network.max_response_bytes 500000
+wukong config show
 ```
 
-`uaa config set` 是**读-改-写**：加载整个文件、改一个键、把整份写回去。所以序列化器漏掉一个节不是「少写一行」，而是**把用户的设置从文件里删掉**。
+`wukong config set` 是**读-改-写**：加载整个文件、改一个键、把整份写回去。所以序列化器漏掉一个节不是「少写一行」，而是**把用户的设置从文件里删掉**。
 
 原来的序列化器手写了一个节列表（`models` / `permissions` / `agent`），于是 `[permissions.network]`、`[sandbox]`、`[memory]`、`[multi_agent]` 都会在下次 `config set` 时消失——最尖的一处是手写的网络白名单，它会在有人改一次步数预算时无声蒸发。
 
@@ -211,7 +211,7 @@ CLI (typer + rich)
 ### 目录
 
 ```
-src/unified_agent/
+src/wukong/
 ├── types.py            EffectClass / Message / ToolCall / 幂等键
 ├── config.py           TOML 结构化配置 + env 覆盖
 ├── errors.py
@@ -297,7 +297,7 @@ requires_confirmation = true
 ## 服务层：AG-UI，不是自造的 WebSocket 格式
 
 ```bash
-uaa serve                      # 控制台 http://127.0.0.1:8000/
+wukong serve                      # 控制台 http://127.0.0.1:8000/
 ```
 
 前端协议直接实现 **AG-UI**（CopilotKit 与 LangGraph / Mastra / Pydantic AI / Microsoft Agent Framework 共用的开放标准），而不是自己发明一套 WebSocket 消息格式。收益是具体的：控制台可以随时换成 CopilotKit 的 React 组件，后端一行不改。
@@ -338,10 +338,10 @@ curl -N -X POST http://127.0.0.1:8000/agui \
 ## 工作流：加载时就能证明引用不会悬空
 
 ```bash
-uaa workflow list                       # 有哪些、各自能不能加载
-uaa workflow validate triage-and-fix    # 一次报出**所有**问题
-uaa workflow show triage-and-fix        # 按执行顺序打印图
-uaa workflow run triage-and-fix -i goal="修复失败的测试"
+wukong workflow list                       # 有哪些、各自能不能加载
+wukong workflow validate triage-and-fix    # 一次报出**所有**问题
+wukong workflow show triage-and-fix        # 按执行顺序打印图
+wukong workflow run triage-and-fix -i goal="修复失败的测试"
 ```
 
 节点之间**不共享可变状态**，靠显式引用上游输出：`{{#analyse.answer#}}`。这看起来比共享状态更啰嗦，但它换来一件共享状态给不了的东西：**每个引用都能在跑之前检查**。LangGraph 的共享状态里引用错了是运行时 `KeyError`；这里是带位置的加载期错误。
@@ -360,7 +360,7 @@ uaa workflow run triage-and-fix -i goal="修复失败的测试"
 | `iteration` | 对列表逐项跑 body 节点，有 `max_items` 上限 |
 | `end` | 声明输出 |
 
-**运行器是既有运行时之上的驱动，不是平行系统。** 一次工作流运行**本身就是一个 task**：所以事件流、预算、取消、A2A 的任务映射全都自动适用，一行都不用重写。`uaa task events <id>` 就能看到 `workflow_started → node_started/node_completed × N → workflow_completed`。
+**运行器是既有运行时之上的驱动，不是平行系统。** 一次工作流运行**本身就是一个 task**：所以事件流、预算、取消、A2A 的任务映射全都自动适用，一行都不用重写。`wukong task events <id>` 就能看到 `workflow_started → node_started/node_completed × N → workflow_completed`。
 
 **工作流可以声明自己允许的副作用**（`approvals:` 或节点级 `approve:`）—— 这样它能无人值守运行，而且是可评审、可 diff 的。但 `system_admin` **不允许**由工作流授予：和 HTTP 层拒绝它的理由一样，数据文件不是策略权威。
 
@@ -371,10 +371,10 @@ uaa workflow run triage-and-fix -i goal="修复失败的测试"
 ## 记忆：难的不是检索，是矛盾
 
 ```bash
-uaa memory stats                              # 存了什么、向量到底可不可用
-uaa memory search "部署流程" --mode hybrid     # FTS5 + 向量，RRF 融合
-uaa memory reindex                            # 给还没向量的记忆补上
-uaa memory history <id>                       # 这条记忆以前是什么
+wukong memory stats                              # 存了什么、向量到底可不可用
+wukong memory search "部署流程" --mode hybrid     # FTS5 + 向量，RRF 融合
+wukong memory reindex                            # 给还没向量的记忆补上
+wukong memory history <id>                       # 这条记忆以前是什么
 ```
 
 调研 Mem0 / Letta / Zep 三家后收敛到同一个结论：**Agent 记忆的难点不是检索，是矛盾**。只会追加的存储会同时返回「项目用 pytest」和「已迁移到 unittest」，然后让模型去猜哪个是当前的。
@@ -384,7 +384,7 @@ uaa memory history <id>                       # 这条记忆以前是什么
 1. **抽取**——任务结束后提炼原子事实（就是反思那一步）。
 2. **调和**——把每条候选和它最近的邻居比对，判 `add` / `update` / `duplicate` / `none`。
 
-`update` **不覆盖**：旧行留着、`superseded_by` 指向前方、`memory_revisions` 指向后方。所以 `uaa memory history` 还能回答「这条以前是什么」——这正是 Zep 用「失效」而非「替换」的理由。
+`update` **不覆盖**：旧行留着、`superseded_by` 指向前方、`memory_revisions` 指向后方。所以 `wukong memory history` 还能回答「这条以前是什么」——这正是 Zep 用「失效」而非「替换」的理由。
 
 **成本控制决定了它能不能用**：只有存在邻居时才调模型。一条真正的新事实是免费的，而那是绝大多数情况。
 
@@ -396,16 +396,16 @@ uaa memory history <id>                       # 这条记忆以前是什么
 | 向量（cosine） | 语义近邻，sqlite-vec 加速 | 没配 embedding 模型时退化为字符 n-gram 哈希 |
 | curator | 抽取 + 矛盾调和 | 没有模型时退化为精确去重 |
 
-**离线回退是诚实的**：字符 n-gram 哈希抓的是**形式**不是**含义** —— 它能聚类近似重复和词形变化，但不会把「测试很慢」和「pytest 要四十秒」联系起来。`uaa memory stats` 会明说 `semantic: no`，而不是让结果看起来像语义检索。
+**离线回退是诚实的**：字符 n-gram 哈希抓的是**形式**不是**含义** —— 它能聚类近似重复和词形变化，但不会把「测试很慢」和「pytest 要四十秒」联系起来。`wukong memory stats` 会明说 `semantic: no`，而不是让结果看起来像语义检索。
 
 ---
 
 ## 多 Agent：默认关闭，而且理由充分
 
 ```bash
-uaa run --multi-agent "对比这五个模块的设计取舍"
-uaa config set multi_agent.enabled true      # 或者常开
-uaa config set multi_agent.model gpt-4.1-mini # 子 Agent 用便宜模型
+wukong run --multi-agent "对比这五个模块的设计取舍"
+wukong config set multi_agent.enabled true      # 或者常开
+wukong config set multi_agent.model gpt-4.1-mini # 子 Agent 用便宜模型
 ```
 
 调研给出的数字决定了它的默认值：多 Agent 比普通对话多用 **约 15×** token（单 Agent 约 4×），而同一份资料明确说**编程任务不适合**——可并行拆分的子任务比研究类任务少得多。所以它是**显式开启 + 预算闸门**，不是默认行为。
@@ -421,7 +421,7 @@ uaa config set multi_agent.model gpt-4.1-mini # 子 Agent 用便宜模型
 | **子 Agent 的产出落盘** | 完整报告写文件，编排者只拿到**路径 + 有上限的摘要**。把每份报告都粘回父上下文就是「传话游戏」，那会让多 Agent 比单 Agent 更差 |
 | **编排者是唯一写共享状态的人** | 子 Agent 默认只有 `read_only`。它们读、报告，不写——所以不会互相踩，也不会改掉编排者的计划 |
 
-子 Agent 就是一次普通的 `AgentRuntime.run()`，带 `parent_task_id`。**这是它不需要新执行内核的原因**：预算、权限、事件流、恢复全部自动适用，`uaa task events <子任务id>` 就能看它做了什么。真正的收益也在这里——**上下文隔离是白送的**。
+子 Agent 就是一次普通的 `AgentRuntime.run()`，带 `parent_task_id`。**这是它不需要新执行内核的原因**：预算、权限、事件流、恢复全部自动适用，`wukong task events <子任务id>` 就能看它做了什么。真正的收益也在这里——**上下文隔离是白送的**。
 
 三个实现细节值得单独说：
 
@@ -436,11 +436,11 @@ uaa config set multi_agent.model gpt-4.1-mini # 子 Agent 用便宜模型
 ## A2A：跨边界，不是自造协议
 
 ```bash
-uaa config set a2a.enabled true                  # 发布自己
-uaa config set a2a.allow_hosts partner.example.com  # 才允许调用别人
-uaa a2a card                                     # 打印会发布的 Agent Card
-uaa a2a check https://partner.example.com        # 先审对方的卡片，再决定要不要调
-uaa a2a call https://partner.example.com "summarise this repo"
+wukong config set a2a.enabled true                  # 发布自己
+wukong config set a2a.allow_hosts partner.example.com  # 才允许调用别人
+wukong a2a card                                     # 打印会发布的 Agent Card
+wukong a2a check https://partner.example.com        # 先审对方的卡片，再决定要不要调
+wukong a2a call https://partner.example.com "summarise this repo"
 ```
 
 实现的是 [A2A v1.0](https://a2a-protocol.org) 的 JSON-RPC 绑定 + Agent Card + SSE 流式。**不自造 `AgentMessage`**（原规格 §13.4 想自造，作废）。
@@ -479,8 +479,8 @@ SUBMITTED → WORKING → INPUT_REQUIRED / AUTH_REQUIRED
 
 ```bash
 pip install -e ".[desktop]"     # 只多一个依赖：pywebview
-uaa desktop                      # 原生窗口
-uaa desktop --bundle             # ~/Applications/UnifiedAgent.app，可双击
+wukong desktop                      # 原生窗口
+wukong desktop --bundle             # ~/Applications/UnifiedAgent.app，可双击
 ```
 
 > **如果 `pip install` 报 `EEXIST: mkdir .../pip-install-*/...`**，用 `uv` 装：
@@ -533,9 +533,9 @@ ledger(begin) → checkpoint(原文件) → execute → ledger(end)
 原文件**原样存储、不脱敏**——这是对「产物一律脱敏」的一条刻意例外：检查点存在的意义就是**逐字节写回**，脱敏过的副本还原出来是坏文件。内容本来就是工作区里的文件，同一个信任域。
 
 ```bash
-uaa task rewind <task_id>            # 默认只预览
-uaa task rewind <task_id> --apply    # 真还原
-uaa task rewind <task_id> --from-seq 42   # 只撤销 seq 42 之后的写入
+wukong task rewind <task_id>            # 默认只预览
+wukong task rewind <task_id> --apply    # 真还原
+wukong task rewind <task_id> --from-seq 42   # 只撤销 seq 42 之后的写入
 ```
 
 预览是默认，`--apply` 才动手：还原文件是**唯一真正有破坏性的那件事**（可能覆盖 agent 之后的人工改动），所以它必须被明确要求，而不是一个「看看发生了什么」的命令的默认行为。
@@ -587,7 +587,7 @@ mem0 v3 把写时调和整个删掉、改成 ADD-only，LongMemEval 涨了 26 �
 |---|---|---|
 | 形态 | 一个**运行时**（内核 + 库 + CLI + 服务层） | 一个**个人助理平台**（常驻、多渠道、有插件生态） |
 | 强项 | 执行语义的严谨性：可中断可恢复、写前台账、权限闸门、可回退、审计可查 | 触达面：飞书/微信/Telegram 等渠道、cron、设备、浏览器、插件市场 |
-| 典型用法 | `uaa run "修这个 bug"`，或作为库被别的系统调用 | 挂在渠道上，随时被消息唤起 |
+| 典型用法 | `wukong run "修这个 bug"`，或作为库被别的系统调用 | 挂在渠道上，随时被消息唤起 |
 
 **它们有而本项目没有的**：渠道适配器、常驻调度（cron）、浏览器操作、插件市场、TS SDK。
 
@@ -604,7 +604,7 @@ mem0 v3 把写时调和整个删掉、改成 ADD-only，LongMemEval 涨了 26 �
 **它们没有而本项目有的**（这些是真正值得保留的差异）：
 
 - **可中断可恢复 + 写前台账**：崩溃后能区分「肯定没跑」和「可能跑过」，非幂等调用标记 `ambiguous` 并让模型去验证，而不是盲目重跑
-- **文件级回退**：`uaa task rewind` 能把一个任务改过的文件按检查点还原。它们能回放会话，回不了工作区
+- **文件级回退**：`wukong task rewind` 能把一个任务改过的文件按检查点还原。它们能回放会话，回不了工作区
 - **六档强制权限 + 执行向量防护**：`.git/hooks`、`.git/config` 这类「延迟执行的代码」被钉死不可写——写一个 hook 等于在审批闸门之外植入代码
 - **拒绝让模型销毁数据**：记忆不允许被模型判定「已被取代」而隐藏（见下），工具审批也不允许模型自己批准
 - **A2A v1.0**：跨组织边界的标准协议，含 SSRF 三重防线与不可信卡片审查
@@ -637,16 +637,16 @@ mem0 v3 把写时调和整个删掉、改成 ADD-only，LongMemEval 涨了 26 �
 ## 进程隔离：macOS 用 Seatbelt，Docker 作为可选后端
 
 ```bash
-uaa sandbox        # 报告实际生效的是哪个后端，并真的试一次越界写入
+wukong sandbox        # 报告实际生效的是哪个后端，并真的试一次越界写入
 ```
 
 ```bash
-uaa sandbox --report    # 报告 + 把机器可读结果写到 <home>/sandbox-verify.json
+wukong sandbox --report    # 报告 + 把机器可读结果写到 <home>/sandbox-verify.json
 ```
 
-`uaa config set sandbox.mode read-only` 会让**项目目录含 `.git` 全部只读** —— `git log/diff/show/blame` 能用，`commit/checkout/fetch` 和文件编辑全部失败。**「分析这个项目」和「修改这个项目」是两个不同的档位**，不该共用一份权限配置。
+`wukong config set sandbox.mode read-only` 会让**项目目录含 `.git` 全部只读** —— `git log/diff/show/blame` 能用，`commit/checkout/fetch` 和文件编辑全部失败。**「分析这个项目」和「修改这个项目」是两个不同的档位**，不该共用一份权限配置。
 
-> **必须在普通终端里跑。** macOS **拒绝**从「已经被沙箱化的进程」安装更窄的 profile（`sandbox_apply: Operation not permitted`）—— 容器里、以及任何会给子进程套沙箱的环境里都探测不到。`uaa sandbox` 会检测到这种情况，并打印一条**可直接粘贴**的命令。
+> **必须在普通终端里跑。** macOS **拒绝**从「已经被沙箱化的进程」安装更窄的 profile（`sandbox_apply: Operation not permitted`）—— 容器里、以及任何会给子进程套沙箱的环境里都探测不到。`wukong sandbox` 会检测到这种情况，并打印一条**可直接粘贴**的命令。
 
 报告里带**环境指纹**，因为「这台机器上 Seatbelt 不能用」和「这里测不了」导向相反的决定，而单看探测结果分不出来：
 
@@ -664,7 +664,7 @@ uaa sandbox --report    # 报告 + 把机器可读结果写到 <home>/sandbox-ve
 如果探测失败但环境是干净的，用 `--bisect` 定位是哪条规则被拒：
 
 ```bash
-uaa sandbox --bisect      # 逐条试，并把候选修法一起测掉
+wukong sandbox --bisect      # 逐条试，并把候选修法一起测掉
 ```
 
 它同时回答两个问题：**哪条规则导致拒绝**，以及**替代写法能不能用、是否仍然挡得住越界写入**。一次跑完，不用来回两轮。
@@ -687,9 +687,9 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 
 **可用性是探测出来的，不是假定的。** 二进制存在不等于能用：在已经被沙箱化的进程里，macOS **拒绝**安装一个更窄的 profile。所以 `available` 会真的去应用一个限制性 profile 试一次——用 `(allow default)` 探测是无效的，那在任何环境都通过，正好掩盖了要防的失败。
 
-**回退一定留痕。** `wrap()` 在后端不可用时会直通（不能让坏沙箱废掉所有命令），但 `uaa run/chat/serve/doctor` 都会打出告警。静默降级到无隔离，比没有隔离更糟。
+**回退一定留痕。** `wrap()` 在后端不可用时会直通（不能让坏沙箱废掉所有命令），但 `wukong run/chat/serve/doctor` 都会打出告警。静默降级到无隔离，比没有隔离更糟。
 
-诚实的限制，`uaa sandbox` 会全部打出来：网络是放开的（**不是出口防火墙**）；`npm login`/`gh auth login` 在沙箱内会失败（它们要**写**凭据文件）；macOS 的 Keychain 经 Mach IPC 的写入挡不住；`sandbox-exec` 被 Apple 标记为弃用。
+诚实的限制，`wukong sandbox` 会全部打出来：网络是放开的（**不是出口防火墙**）；`npm login`/`gh auth login` 在沙箱内会失败（它们要**写**凭据文件）；macOS 的 Keychain 经 Mach IPC 的写入挡不住；`sandbox-exec` 被 Apple 标记为弃用。
 
 ---
 
@@ -705,7 +705,7 @@ Agent 必须读代码、读配置、读工具链；读也锁死它就废了。�
 - **A2A 出站请求三重防线**：scheme 必须是 http/https → host 必须在 `a2a.allow_hosts`（默认空 = 谁也不调）→ **解析后的地址必须是公网**（`127.0.0.1` / `169.254.169.254` / `10.x` / `::1` 全拦）。第三条是经典的绕过，也是最常被跳过的检查。重定向逐跳复检，**卡片自己的 `url` 也要过检查**——有效的卡片不等于可信的卡片。
 - **远端 Agent Card 按不可信输入处理**：schema 校验 + 复用技能安全审查的 prompt-injection 检测器扫 `name`/`description`/每个 skill 的描述。
 - **执行向量一律不可写**：`.git/hooks/**`、`.git/config`、`.git/modules/**/config` 即使在工作区内也拒绝写入。理由不是「敏感数据」——读一个 hook 是有用的，agent 应该知道项目跑什么——而是**写入会让代码在之后执行，在审批闸门之外**。这道检查在 `decide` 的围栏步骤里，**`--yes` 覆盖不了它**。
-- **agent 自己的策略与审计日志不可写**：`config.toml` 与 `uaa.db`。正常情况下它们在 workspace 之外、围栏已经挡住；但把 workspace 设成 home 目录会把它们包进来，而「agent 改自己的权限或自己的审计记录」不是任何人的本意。
+- **agent 自己的策略与审计日志不可写**：`config.toml` 与 `wukong.db`。正常情况下它们在 workspace 之外、围栏已经挡住；但把 workspace 设成 home 目录会把它们包进来，而「agent 改自己的权限或自己的审计记录」不是任何人的本意。
 - **检查点是唯一不脱敏的产物**：它存在的意义是**逐字节写回**，脱敏过的副本还原出来是坏文件。内容是工作区里已有的文件，同一个信任域。
 
 **A2A 明确没做的两件事**（规范点名，但属于部署关注点而不是库的事）：
@@ -772,14 +772,14 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 | 沙箱不可用时 `wrap` 静默直通 | 用户配了 Seatbelt 却在裸跑，没人告诉他 |
 | **判定逻辑写反** | `escaped` 非空意味着写入**逃逸了**，却返回「已阻断」—— 报告会给出与事实相反的结论 |
 | 可粘贴命令里的路径没加引号 | 项目路径含空格（`WorkBuddy AI`），粘贴即失败 |
-| **健康探测不带令牌** | 令牌默认开启，于是 `uaa desktop` 每次都会报「服务起不来」，而服务其实好好的 |
+| **健康探测不带令牌** | 令牌默认开启，于是 `wukong desktop` 每次都会报「服务起不来」，而服务其实好好的 |
 | **`iconutil` 要求目录名以 `.iconset` 结尾** | 起错名一律报 "Invalid Iconset"，而失败原因被吞成「iconutil 不可用」 |
 | 打包用 `rmtree` 清理中间产物 | 递归删除撞上删除护栏，打包直接崩；改成暂存目录 + 重命名换入 |
 | `--check` 却先要求 GUI 可用 | 它存在的意义就是在没有 GUI 的地方验证，结果在 CI 上必然失败 |
 
 ### 第二轮：声明了但没接线
 
-上一批是「代码看起来对、行为不对」。这一批是同一类问题的一个子类，而且更难发现，因为**它不产生任何错误**：字段照常出现在 `uaa config show` 里，事件类型照常能 import，类型检查全过、测试全绿、答案也对——只是那个功能悄悄什么都没做。
+上一批是「代码看起来对、行为不对」。这一批是同一类问题的一个子类，而且更难发现，因为**它不产生任何错误**：字段照常出现在 `wukong config show` 里，事件类型照常能 import，类型检查全过、测试全绿、答案也对——只是那个功能悄悄什么都没做。
 
 | 缺陷 | 为什么危险 |
 |---|---|
@@ -788,8 +788,8 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 | **候选目录只写不读** | Agent 写出的技能候选落在磁盘上，然后对所有命令**不可见**。README 宣称「人工闸门」，但人连待审的东西都看不到——闸门没有可闸之物 |
 | **技能状态阶梯只活在内存里** | `promote()` 改的是一个变量。下一个进程看到的仍是目录默认值，于是「阶梯」每次重启归零 |
 | `skill_runs` 表只写不读 | schema 承诺它回答「这个技能到底有没有用」，但没有任何读取路径，`deprecate` 只能凭感觉 |
-| **反射只接在 CLI 上** | `uaa run --reflect` 会学习，`POST /agui` 启动的任务永远不写记忆、不产候选。同一个内核能力只从两个入口里的一个可达 |
-| **`config_to_toml` 手写节列表** | `uaa config set` 是读-改-写：序列化器不认识的节会被**从文件里删掉**。手写的 `[permissions.network] allow_domains` 在有人改一次步数预算时无声消失 |
+| **反射只接在 CLI 上** | `wukong run --reflect` 会学习，`POST /agui` 启动的任务永远不写记忆、不产候选。同一个内核能力只从两个入口里的一个可达 |
+| **`config_to_toml` 手写节列表** | `wukong config set` 是读-改-写：序列化器不认识的节会被**从文件里删掉**。手写的 `[permissions.network] allow_domains` 在有人改一次步数预算时无声消失 |
 | **`_hoist_effect_keys` 把策略表当成决策值** | `network` 既是效果类名、又是 `[permissions.network]` 表名。它无条件 `pop("network")`，把网络白名单塞进了决策映射 |
 | **上面两条互相掩盖** | 序列化器从不写 `permissions.network`，所以校验器的越界一直没被触发。修好序列化器的那一刻，另一个 bug 立刻冒出来——两个缺陷叠在一起，表现是「什么都没发生」 |
 | `config set` 的路径只支持 `agent.*` / `models.*` | `memory.vector_limit`、`sandbox.mode`、`multi_agent.enabled` 都是文档里的旋钮，CLI 却拒绝设置。只能手改 TOML 的配置项，等于大多数人永远找不到 |
@@ -817,7 +817,7 @@ A2A **两个方向都默认关闭**：发布一个接受别的 Agent 派活儿�
 
 | 缺陷 | 为什么危险 |
 |---|---|
-| **任务的 workspace 没有被持久记录** | session 里记了 `working_dir`，但 task 自己不记。于是 `uaa task approve <id>` 从别的目录执行时，**后续每个工具调用的落点都被静默换掉**：模型以为在 A 目录，而路径围栏是按「恢复进程的目录」建的、放行的是 B。两个答案，错的那个赢了。对一个以「可中断可恢复」为卖点的系统，这是硬伤 |
+| **任务的 workspace 没有被持久记录** | session 里记了 `working_dir`，但 task 自己不记。于是 `wukong task approve <id>` 从别的目录执行时，**后续每个工具调用的落点都被静默换掉**：模型以为在 A 目录，而路径围栏是按「恢复进程的目录」建的、放行的是 B。两个答案，错的那个赢了。对一个以「可中断可恢复」为卖点的系统，这是硬伤 |
 | **模型返回空内容时被报告为 `completed`** | 推理模型把输出预算花在推理上、然后一个字都不输出，是**常见形状**；而运行时把它当成一个成功完成的空答案。任务「成功」了、什么都没做，这正是这个项目最想避免的那一类 |
 
 两条都是**「声明/记录存在，但代码不读它」**的变体——和第一、二批同一个根因，只是这次要靠运行才发现，审计脚本看不见它们，因为涉及的字段都被引用了。

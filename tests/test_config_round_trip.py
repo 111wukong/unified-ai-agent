@@ -1,6 +1,6 @@
 """Configuration round-trip.
 
-`uaa config set` is a read-modify-write: it loads the file, changes one key,
+`wukong config set` is a read-modify-write: it loads the file, changes one key,
 and writes the whole thing back. So any field the serializer does not know
 about is not merely missing from the output -- it is **deleted from the
 file** the first time the user changes anything else.
@@ -22,23 +22,23 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.config import (
+from wukong.config import (
     ConfigEditor,
     ModelSpec,
     Settings,
     config_to_toml,
     load_settings,
 )
-from unified_agent.errors import ConfigError
-from unified_agent.sandbox.base import SandboxMode
-from unified_agent.types import Decision, EffectClass
+from wukong.errors import ConfigError
+from wukong.sandbox.base import SandboxMode
+from wukong.types import Decision, EffectClass
 
 
 def comprehensive() -> Settings:
     """A settings object with a non-default value in every section."""
     settings = Settings(
-        home=Path("/tmp/uaa-round-trip-home"),
-        workspace=Path("/tmp/uaa-round-trip-ws"),
+        home=Path("/tmp/wukong-round-trip-home"),
+        workspace=Path("/tmp/wukong-round-trip-ws"),
     )
     settings.default_model = "deepseek"
     settings.skill_dirs = ["skills", ".agent/skills"]
@@ -108,7 +108,7 @@ def test_the_sections_that_used_to_be_dropped_are_in_the_file(tmp_path: Path) ->
 def test_a_hand_written_network_allowlist_survives_an_unrelated_set(tmp_path: Path) -> None:
     """The concrete data-loss bug, end to end.
 
-    Someone hand-writes a network allowlist, then runs `uaa config set` for
+    Someone hand-writes a network allowlist, then runs `wukong config set` for
     something unrelated. The allowlist must still be there.
     """
     path = tmp_path / "config.toml"

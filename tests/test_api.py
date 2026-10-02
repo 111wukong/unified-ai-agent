@@ -16,8 +16,8 @@ pytest.importorskip("fastapi", reason="install with `pip install -e '.[api]'`")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from unified_agent.api.app import Service, create_app  # noqa: E402
-from unified_agent.agent.factory import build_agent  # noqa: E402
+from wukong.api.app import Service, create_app  # noqa: E402
+from wukong.agent.factory import build_agent  # noqa: E402
 
 from tests.conftest import ScriptedModel, ScriptedModels  # noqa: E402
 
@@ -512,8 +512,8 @@ class TestWireFormatInvariants:
 
     def test_on_event_always_returns_a_list(self) -> None:
         """Unit-level guard for the normalisation, independent of HTTP."""
-        from unified_agent.api.agui import AgUiEncoder
-        from unified_agent.observability.events import Event, EventType
+        from wukong.api.agui import AgUiEncoder
+        from wukong.observability.events import Event, EventType
 
         encoder = AgUiEncoder(task_id="t", thread_id="th", run_id="r")
         single = encoder.on_event(
@@ -771,7 +771,7 @@ class TestGuard:
         import asyncio as _asyncio
 
         from tests.conftest import ScriptedModel, ScriptedModels
-        from unified_agent.agent.factory import build_agent
+        from wukong.agent.factory import build_agent
 
         created: list = []
 
@@ -848,13 +848,13 @@ class TestGuard:
     def test_wrong_token_is_refused(self, guarded) -> None:
         client = guarded(token="s3cret")
         with client:
-            response = client.get("/api/v1/health", headers={"X-UAA-Token": "nope"})
+            response = client.get("/api/v1/health", headers={"X-WUKONG-Token": "nope"})
         assert response.status_code == 403
 
     def test_header_token_is_accepted(self, guarded) -> None:
         client = guarded(token="s3cret")
         with client:
-            response = client.get("/api/v1/health", headers={"X-UAA-Token": "s3cret"})
+            response = client.get("/api/v1/health", headers={"X-WUKONG-Token": "s3cret"})
         assert response.status_code == 200
         assert response.json()["token_required"] is True
 
@@ -883,7 +883,7 @@ class TestGuard:
         assert response.status_code == 403
 
     def test_no_token_configured_means_no_token_needed(self, guarded) -> None:
-        """`uaa serve` without --token stays usable; the Host check still runs."""
+        """`wukong serve` without --token stays usable; the Host check still runs."""
         client = guarded(token=None)
         with client:
             assert client.get("/api/v1/health").status_code == 200

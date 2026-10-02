@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import pytest
 
-from unified_agent.agent.state import TaskStatus, replay
-from unified_agent.observability.events import EventType
+from wukong.agent.state import TaskStatus, replay
+from wukong.observability.events import EventType
 from tests.conftest import ScriptedModels
 
 
-from unified_agent.types import idempotency_key
+from wukong.types import idempotency_key
 
 
 async def _start_task(agent, session_id: str, goal: str = "do the thing"):  # noqa: ANN001
@@ -129,7 +129,7 @@ class TestUnfinishedCalls:
         second = idempotency_key("task_1", "step_1", "read_file", {"path": "a.py"})
         assert first == second
 
-        from unified_agent.agent.repetition import call_signature
+        from wukong.agent.repetition import call_signature
 
         # The repetition guard's signature is the one that must be stable
         # across tasks and steps, and it is -- which is why it is separate.
@@ -388,9 +388,9 @@ class TestTaskWorkspace:
 
         The task has to be *unfinished* for this to matter -- a completed one
         returns before the check -- so it is paused on an approval, which is
-        exactly the state `uaa task approve` is run from.
+        exactly the state `wukong task approve` is run from.
         """
-        from unified_agent.agent.factory import build_agent
+        from wukong.agent.factory import build_agent
 
         agent, _ = await scripted(
             [{"tool_calls": [{"name": "run_command", "arguments": {"command": "ls"}}]}]
@@ -424,7 +424,7 @@ class TestTaskWorkspace:
     ) -> None:
         """Tasks created before the field existed carry no workspace, and the
         check must not turn them into unresumable history."""
-        from unified_agent.agent.state import replay as _replay
+        from wukong.agent.state import replay as _replay
 
         agent, _ = await scripted([{"content": "done"}])
         task_id = agent.store.create_task(
@@ -439,13 +439,13 @@ class TestTaskWorkspace:
 
 
 class TestCliWorkspaceAdoption:
-    """`uaa task approve <id>` should not need `--workspace` to be correct."""
+    """`wukong task approve <id>` should not need `--workspace` to be correct."""
 
     def test_the_helper_adopts_the_recorded_workspace(
         self, settings, tmp_path  # noqa: ANN001
     ) -> None:
-        from unified_agent.cli import _settings_for_task
-        from unified_agent.storage.store import Store
+        from wukong.cli import _settings_for_task
+        from wukong.storage.store import Store
 
         store = Store(settings.db_path)
         try:
@@ -466,8 +466,8 @@ class TestCliWorkspaceAdoption:
     ) -> None:
         """The helper must not paper over a conflict the user asked for: the
         runtime's refusal is what names the right flag."""
-        from unified_agent.cli import _settings_for_task
-        from unified_agent.storage.store import Store
+        from wukong.cli import _settings_for_task
+        from wukong.storage.store import Store
 
         store = Store(settings.db_path)
         try:

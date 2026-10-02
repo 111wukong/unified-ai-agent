@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 
-from unified_agent.agent.state import TaskStatus, replay
-from unified_agent.config import ModelSpec
-from unified_agent.errors import ModelError
-from unified_agent.observability.events import EventType
-from unified_agent.types import EffectClass
+from wukong.agent.state import TaskStatus, replay
+from wukong.config import ModelSpec
+from wukong.errors import ModelError
+from wukong.observability.events import EventType
+from wukong.types import EffectClass
 
 from tests.conftest import ScriptedModels, looping_script
 
@@ -346,9 +346,9 @@ class TestEmptyResponse:
     async def test_an_empty_response_fails_rather_than_completing(
         self, settings, session_id: str
     ) -> None:
-        from unified_agent.agent.factory import build_agent
-        from unified_agent.models.mock import MockModel
-        from unified_agent.types import ModelResponse
+        from wukong.agent.factory import build_agent
+        from wukong.models.mock import MockModel
+        from wukong.types import ModelResponse
 
         class Silent(MockModel):
             async def _chat(self, messages, **kwargs):  # noqa: ANN001, ANN003
@@ -373,9 +373,9 @@ class TestEmptyResponse:
         """`finish_reason=length` is the actionable case: reasoning models
         spend output tokens on their reasoning, so a budget that looks
         generous for prose can be gone before any content appears."""
-        from unified_agent.agent.factory import build_agent
-        from unified_agent.models.mock import MockModel
-        from unified_agent.types import ModelResponse
+        from wukong.agent.factory import build_agent
+        from wukong.models.mock import MockModel
+        from wukong.types import ModelResponse
 
         class Truncated(MockModel):
             async def _chat(self, messages, **kwargs):  # noqa: ANN001, ANN003
@@ -396,9 +396,9 @@ class TestEmptyResponse:
     async def test_whitespace_only_content_is_also_not_an_answer(
         self, settings, session_id: str
     ) -> None:
-        from unified_agent.agent.factory import build_agent
-        from unified_agent.models.mock import MockModel
-        from unified_agent.types import ModelResponse
+        from wukong.agent.factory import build_agent
+        from wukong.models.mock import MockModel
+        from wukong.types import ModelResponse
 
         class Blank(MockModel):
             async def _chat(self, messages, **kwargs):  # noqa: ANN001, ANN003

@@ -15,9 +15,9 @@ import io
 import pytest
 from rich.console import Console
 
-from unified_agent.agent.runtime import AgentResult
-from unified_agent.agent.state import PendingConfirmation
-from unified_agent import cli as cli_module
+from wukong.agent.runtime import AgentResult
+from wukong.agent.state import PendingConfirmation
+from wukong import cli as cli_module
 
 
 @pytest.fixture

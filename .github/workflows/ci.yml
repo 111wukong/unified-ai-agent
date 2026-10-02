@@ -51,7 +51,7 @@ jobs:
         # IndentationError rather than as formatting.
         run: >-
           python -c "import pathlib, tempfile;
-          from unified_agent.storage.db import connect, load_extensions;
+          from wukong.storage.db import connect, load_extensions;
           c = connect(pathlib.Path(tempfile.mkdtemp()) / 'x.db');
           a = load_extensions(c);
           print('accelerator:', a);
@@ -79,25 +79,25 @@ jobs:
       - name: Offline end-to-end smoke
         # Proves the CLI actually works, not just that the units pass.
         run: |
-          export UAA_HOME="$RUNNER_TEMP/uaa"
-          uaa init
-          uaa doctor
-          uaa demo
-          uaa tools | head -20
-          uaa sandbox
-          uaa desktop --check
-          uaa skill validate skills/code-review
-          uaa workflow list
-          uaa workflow validate triage-and-fix
-          uaa workflow list
-          uaa workflow validate triage-and-fix
+          export WUKONG_HOME="$RUNNER_TEMP/wukong"
+          wukong init
+          wukong doctor
+          wukong demo
+          wukong tools | head -20
+          wukong sandbox
+          wukong desktop --check
+          wukong skill validate skills/code-review
+          wukong workflow list
+          wukong workflow validate triage-and-fix
+          wukong workflow list
+          wukong workflow validate triage-and-fix
 
       - name: Service smoke
         # Boot the real server and drive the AG-UI stream over HTTP.
         run: |
           set -euo pipefail
-          export UAA_HOME="$RUNNER_TEMP/uaa-serve"
-          uaa serve --port 8899 &
+          export WUKONG_HOME="$RUNNER_TEMP/wukong-serve"
+          wukong serve --port 8899 &
           SERVER=$!
           for _ in $(seq 1 30); do
             curl -sf --noproxy '*' http://127.0.0.1:8899/api/v1/health >/dev/null && break
@@ -131,5 +131,5 @@ jobs:
           pip install -e .
           for d in skills/*/; do
             echo "validating $d"
-            uaa skill validate "$d" || exit 1
+            wukong skill validate "$d" || exit 1
           done

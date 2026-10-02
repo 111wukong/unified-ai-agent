@@ -388,14 +388,14 @@ SUBMITTED → WORKING → INPUT_REQUIRED / AUTH_REQUIRED
 | 向量记忆 + 矛盾处理 | ✅ | `memory/`：三层（FTS5 / 向量 / curator），sqlite-vec 只当加速器 |
 | YAML 工作流 | ✅ | `orchestration/`：七种节点 + 静态校验 + 运行器（工作流运行本身是一个 task） |
 | **多 Agent** | ✅ | `orchestration/multi_agent.py` + `tools/multi_agent.py`：orchestrator-worker，默认关闭，硬上限 + 契约校验 + 报告落盘 |
-| 技能审核流程 | ✅ | `skills/registry.py`：候选目录纳入扫描、状态持久化到 DB、`uaa skill promote/review/runs` + `POST /api/v1/skills/{name}/promote` |
+| 技能审核流程 | ✅ | `skills/registry.py`：候选目录纳入扫描、状态持久化到 DB、`wukong skill promote/review/runs` + `POST /api/v1/skills/{name}/promote` |
 | A2A v1.0 | ✅ | `a2a/`：Agent Card + JSON-RPC（message/send · message/stream · tasks/get · tasks/cancel）+ SSE；SSRF 三重防线；远端卡片按不可信输入审查。Signed Cards 与重放防护**未实现**并已写明 |
 
 ### 实施中发现的三条修正
 
 1. **Seatbelt 的可用性必须探测，不能靠「二进制存在」。** 在已被沙箱化的进程里，macOS **拒绝**安装一个更窄的 profile（`sandbox_apply: Operation not permitted`）。所以 `available` 会真的去应用一个限制性 profile 试试 —— 用 `(allow default)` 探测是无效的，那在任何环境都能通过，正好掩盖了要防的那种失败。
-2. **沙箱不可用时 `wrap()` 静默直通，这是对的（不能让坏沙箱废掉所有命令），但必须由调用方出声音。** 于是有了 `SandboxSelection.warning()`，`uaa run`/`chat`/`serve`/`doctor` 都会打。否则用户配了 Seatbelt 却在裸跑。
-3. **工具结果必须写进 `TOOL_COMPLETED` 事件，不能只放在 `LOG_APPENDED` 里。** 否则 UI 流出来的 `TOOL_CALL_RESULT` 是空的，`uaa task events` 也只能看到「某个工具跑了」而看不到它说了什么。
+2. **沙箱不可用时 `wrap()` 静默直通，这是对的（不能让坏沙箱废掉所有命令），但必须由调用方出声音。** 于是有了 `SandboxSelection.warning()`，`wukong run`/`chat`/`serve`/`doctor` 都会打。否则用户配了 Seatbelt 却在裸跑。
+3. **工具结果必须写进 `TOOL_COMPLETED` 事件，不能只放在 `LOG_APPENDED` 里。** 否则 UI 流出来的 `TOOL_CALL_RESULT` 是空的，`wukong task events` 也只能看到「某个工具跑了」而看不到它说了什么。
 
 
 ### Phase 3 实施中的四条修正
@@ -436,7 +436,7 @@ SUBMITTED → WORKING → INPUT_REQUIRED / AUTH_REQUIRED
 
 1. **候选目录必须被扫描，否则「人工闸门」没有可闸之物。** 原设计把候选放在搜索路径之外来保证它不能自动生效 —— 那确实有效，但也让它对所有命令不可见。正确的做法是**扫描它、但让它无法自我提权**：候选目录是 Agent 唯一能写的目录，所以那里的文件无论 frontmatter 自称什么状态，一律按 `candidate` 处理。
 2. **状态优先级：DB 行 > frontmatter > 目录默认值。** DB 行排第一，因为只有 `promote` 会写它，而 `promote` 是人的动作；目录默认值排最后，因为它是「谁写的」推出来的，不是判断出来的。写入侧必须 **upsert 而不是 UPDATE**：一条刚写出的候选还没有行，`UPDATE` 会成功但什么都不改。
-3. **反射必须住在运行时里，不是 CLI 里。** 它原本只在 `uaa run --reflect` 里调用，于是 `POST /agui` 启动的任务永远不写记忆、不产技能候选 —— 一个内核能力只从两个入口里的一个可达。移到 `AgentRuntime` 之后，CLI 只负责**渲染**事件里留下的结果。
+3. **反射必须住在运行时里，不是 CLI 里。** 它原本只在 `wukong run --reflect` 里调用，于是 `POST /agui` 启动的任务永远不写记忆、不产技能候选 —— 一个内核能力只从两个入口里的一个可达。移到 `AgentRuntime` 之后，CLI 只负责**渲染**事件里留下的结果。
 
 
 ### A2A 实施中的四条修正

@@ -9,18 +9,18 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.config import PermissionConfig
-from unified_agent.tools.permissions import (
+from wukong.config import PermissionConfig
+from wukong.tools.permissions import (
     CommandGuard,
     PathGuard,
     PermissionEngine,
     scrub_env,
 )
-from unified_agent.tools.registry import ToolRegistry
-from unified_agent.types import EffectClass
+from wukong.tools.registry import ToolRegistry
+from wukong.types import EffectClass
 
-from unified_agent.tools.fs import FS_TOOLS
-from unified_agent.tools.shell import RunCommandTool
+from wukong.tools.fs import FS_TOOLS
+from wukong.tools.shell import RunCommandTool
 
 
 @pytest.fixture
@@ -340,7 +340,7 @@ class TestEngineDecisions:
         assert engine.decide(registry.get("run_command"), {"command": "pytest"}).allowed
 
     def test_system_admin_is_denied_by_default(self, tmp_path: Path) -> None:
-        from unified_agent.tools.base import Tool, ToolSpec
+        from wukong.tools.base import Tool, ToolSpec
 
         class AdminTool(Tool):
             spec = ToolSpec(
@@ -357,7 +357,7 @@ class TestEngineDecisions:
 
     def test_deny_survives_cli_approval_as_confirm(self, tmp_path: Path) -> None:
         """--yes must not silently grant SYSTEM_ADMIN."""
-        from unified_agent.tools.base import Tool, ToolSpec
+        from wukong.tools.base import Tool, ToolSpec
 
         class AdminTool(Tool):
             spec = ToolSpec(
@@ -430,7 +430,7 @@ class TestExecutionVectorsAreNotWritable:
             policy=PermissionConfig(),
         )
         assert guard.check_write("config.toml").denied
-        assert guard.check_write("uaa.db").denied
+        assert guard.check_write("wukong.db").denied
         assert "own state" in guard.check_write("config.toml").reason
         # Anything else in there is an ordinary file.
         assert not guard.check_write("notes.md").denied

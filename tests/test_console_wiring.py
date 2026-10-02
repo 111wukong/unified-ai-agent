@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-CONSOLE = Path(__file__).resolve().parents[1] / "src/unified_agent/api/console"
+CONSOLE = Path(__file__).resolve().parents[1] / "src/wukong/api/console"
 
 
 @pytest.fixture(scope="module")

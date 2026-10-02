@@ -5,7 +5,7 @@ profile cannot be applied inside this test environment, because macOS
 refuses to install a narrowing sandbox from an already-sandboxed process.
 So the tests cover the parts that *are* verifiable -- the probe's honesty,
 the generated profile's contents, mode semantics, argv rewriting, and the
-fallback reporting -- and `uaa sandbox` performs the live escape check for a
+fallback reporting -- and `wukong sandbox` performs the live escape check for a
 user running from a normal terminal.
 """
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.sandbox import (
+from wukong.sandbox import (
     DockerSandbox,
     NoSandbox,
     ProbeResult,
@@ -60,7 +60,7 @@ class TestProbeHonesty:
         `(allow default)` applies anywhere and would always pass, which is
         exactly the false confidence a probe exists to prevent.
         """
-        from unified_agent.sandbox.base import _PROBE_PROFILE
+        from wukong.sandbox.base import _PROBE_PROFILE
 
         assert "deny default" in _PROBE_PROFILE
         assert "allow default" not in _PROBE_PROFILE
@@ -82,7 +82,7 @@ class TestProbeDoesNotOverclaim:
     """
 
     def test_a_signal_death_does_not_claim_a_cause(self) -> None:
-        from unified_agent.sandbox import describe_probe_failure
+        from wukong.sandbox import describe_probe_failure
 
         detail = describe_probe_failure(
             returncode=-6, stdout=b"", stderr=b"", nested=False
@@ -92,7 +92,7 @@ class TestProbeDoesNotOverclaim:
         assert "refusal" in detail
 
     def test_a_signal_death_inside_a_known_sandbox_does_say_so(self) -> None:
-        from unified_agent.sandbox import describe_probe_failure
+        from wukong.sandbox import describe_probe_failure
 
         detail = describe_probe_failure(
             returncode=-6, stdout=b"", stderr=b"", nested=True
@@ -101,7 +101,7 @@ class TestProbeDoesNotOverclaim:
 
     def test_operation_not_permitted_is_enough_on_its_own(self) -> None:
         """The message is evidence even without the environment markers."""
-        from unified_agent.sandbox import describe_probe_failure
+        from wukong.sandbox import describe_probe_failure
 
         detail = describe_probe_failure(
             returncode=71,
@@ -112,7 +112,7 @@ class TestProbeDoesNotOverclaim:
         assert "already inside a sandbox" in detail
 
     def test_stderr_is_kept_verbatim(self) -> None:
-        from unified_agent.sandbox import describe_probe_failure
+        from wukong.sandbox import describe_probe_failure
 
         detail = describe_probe_failure(
             returncode=65, stdout=b"", stderr=b"sandbox-exec: no version specified", nested=False
@@ -121,7 +121,7 @@ class TestProbeDoesNotOverclaim:
 
     def test_stdout_is_used_when_stderr_is_empty(self) -> None:
         """sandbox-exec does not reliably pick a stream."""
-        from unified_agent.sandbox import describe_probe_failure
+        from wukong.sandbox import describe_probe_failure
 
         detail = describe_probe_failure(
             returncode=1, stdout=b"Invalid Iconset", stderr=b"", nested=False
@@ -129,7 +129,7 @@ class TestProbeDoesNotOverclaim:
         assert "Invalid Iconset" in detail
 
     def test_a_plain_nonzero_exit_is_reported_as_an_exit(self) -> None:
-        from unified_agent.sandbox import describe_probe_failure
+        from wukong.sandbox import describe_probe_failure
 
         detail = describe_probe_failure(returncode=3, stdout=b"", stderr=b"", nested=False)
         assert detail == "exit 3"
@@ -324,7 +324,7 @@ class TestSandboxWiring:
     """The sandbox must be reachable from the tools, not just constructible."""
 
     def test_shell_tools_accept_a_sandbox(self, workspace) -> None:  # noqa: ANN001
-        from unified_agent.tools.shell import RunCommandTool, build_shell_tools
+        from wukong.tools.shell import RunCommandTool, build_shell_tools
 
         sandbox = NoSandbox()
         tool = RunCommandTool(sandbox=sandbox, sandbox_mode=SandboxMode.READ_ONLY)
@@ -333,7 +333,7 @@ class TestSandboxWiring:
         assert len(build_shell_tools(sandbox=sandbox)) == 3
 
     def test_git_tools_accept_a_sandbox(self) -> None:  # noqa: ANN001
-        from unified_agent.tools.git import build_git_tools
+        from wukong.tools.git import build_git_tools
 
         sandbox = NoSandbox()
         tools = build_git_tools(sandbox=sandbox, sandbox_mode=SandboxMode.WORKSPACE_WRITE)
@@ -341,8 +341,8 @@ class TestSandboxWiring:
 
     async def test_sandbox_is_applied_to_the_actual_argv(self, workspace, tmp_path) -> None:  # noqa: ANN001
         """Assert on what actually got executed, not on the wrapper existing."""
-        from unified_agent.tools.base import ToolContext
-        from unified_agent.tools.shell import RunCommandTool
+        from wukong.tools.base import ToolContext
+        from wukong.tools.shell import RunCommandTool
 
         recorded: list[list[str]] = []
 
@@ -430,7 +430,7 @@ class TestBackendsIdentifyThemselves:
 
 
 class TestVerificationReport:
-    """`uaa sandbox --report` exists because the check cannot always run here.
+    """`wukong sandbox --report` exists because the check cannot always run here.
 
     macOS refuses to install a narrowing profile from an already-sandboxed
     process, so the verification has to happen in the user's own terminal. A
@@ -441,7 +441,7 @@ class TestVerificationReport:
     """
 
     def test_verdict_says_no_isolation_and_how_to_check(self) -> None:
-        from unified_agent.cli import _sandbox_verdict
+        from wukong.cli import _sandbox_verdict
 
         selection = SandboxSelection(NoSandbox(), "auto", notes=[])
         verdict = _sandbox_verdict(selection, ProbeResult(False, "stubbed"), [])
@@ -449,7 +449,7 @@ class TestVerificationReport:
         assert "normal terminal" in verdict, "the verdict must say what to do"
 
     def test_verdict_confirms_a_working_sandbox(self) -> None:
-        from unified_agent.cli import _sandbox_verdict
+        from wukong.cli import _sandbox_verdict
 
         sandbox = NoSandbox()
         sandbox.name = "seatbelt"
@@ -465,7 +465,7 @@ class TestVerificationReport:
     def test_verdict_flags_an_escape_as_not_working(self) -> None:
         """A sandbox that reports active but lets a write through is worse
         than one that reports inactive: the user stops watching."""
-        from unified_agent.cli import _sandbox_verdict
+        from wukong.cli import _sandbox_verdict
 
         sandbox = NoSandbox()
         sandbox.name = "seatbelt"
@@ -481,7 +481,7 @@ class TestVerificationReport:
     def test_paths_are_quoted_for_pasting(self) -> None:
         """Project paths routinely contain spaces; an unquoted path is a
         command that fails the moment it is pasted."""
-        from unified_agent.cli import _sh
+        from wukong.cli import _sh
 
         assert _sh("/Users/me/WorkBuddy AI/project") == "'/Users/me/WorkBuddy AI/project'"
         assert _sh("/plain/path") == "/plain/path"
@@ -490,8 +490,8 @@ class TestVerificationReport:
         """The file and the printed view must be the same data."""
         import json
 
-        from unified_agent.cli import _sandbox_verdict
-        from unified_agent.sandbox import build_sandbox
+        from wukong.cli import _sandbox_verdict
+        from wukong.sandbox import build_sandbox
 
         settings_home = tmp_path / "home"
         settings_home.mkdir()
@@ -530,7 +530,7 @@ class TestEnvironmentFingerprint:
     """
 
     def test_reports_the_expected_shape(self) -> None:
-        from unified_agent.sandbox import environment_fingerprint
+        from wukong.sandbox import environment_fingerprint
 
         fingerprint = environment_fingerprint()
         assert set(fingerprint) >= {
@@ -542,7 +542,7 @@ class TestEnvironmentFingerprint:
         }
 
     def test_detects_a_sandboxing_parent(self, monkeypatch) -> None:  # noqa: ANN001
-        from unified_agent.sandbox import environment_fingerprint
+        from wukong.sandbox import environment_fingerprint
 
         monkeypatch.setenv("CODEBUDDY_SANDBOX_BROKER_TRACE_ID", "x")
         fingerprint = environment_fingerprint()
@@ -550,8 +550,8 @@ class TestEnvironmentFingerprint:
         assert "CODEBUDDY_SANDBOX_BROKER_TRACE_ID" in fingerprint["sandbox_markers"]
 
     def test_a_clean_environment_reports_clean(self, monkeypatch) -> None:  # noqa: ANN001
-        from unified_agent import sandbox as sandbox_pkg
-        from unified_agent.sandbox import environment_fingerprint
+        from wukong import sandbox as sandbox_pkg
+        from wukong.sandbox import environment_fingerprint
 
         for key in list(os.environ):
             if key.startswith(sandbox_pkg.SANDBOX_MARKER_PREFIXES):
@@ -561,7 +561,7 @@ class TestEnvironmentFingerprint:
         assert fingerprint["sandbox_markers"] == []
 
     def test_the_builtin_profile_probe_answers_without_raising(self) -> None:
-        from unified_agent.sandbox import builtin_profile_probe
+        from wukong.sandbox import builtin_profile_probe
 
         result = builtin_profile_probe()
         assert isinstance(result.ok, bool)
@@ -578,7 +578,7 @@ class TestVerdictDistinguishesEnvironments:
         return SandboxSelection(sandbox, "auto", notes=[])
 
     def test_nested_run_says_the_result_is_uninformative(self) -> None:
-        from unified_agent.cli import _sandbox_verdict
+        from wukong.cli import _sandbox_verdict
 
         verdict = _sandbox_verdict(
             self._selection(),
@@ -593,7 +593,7 @@ class TestVerdictDistinguishesEnvironments:
     def test_clean_run_with_a_refused_builtin_profile_says_seatbelt_is_unusable(
         self,
     ) -> None:
-        from unified_agent.cli import _sandbox_verdict
+        from wukong.cli import _sandbox_verdict
 
         verdict = _sandbox_verdict(
             self._selection(),
@@ -606,7 +606,7 @@ class TestVerdictDistinguishesEnvironments:
         assert "path fence" in verdict, "say what still protects the user"
 
     def test_clean_run_without_a_builtin_answer_stays_neutral(self) -> None:
-        from unified_agent.cli import _sandbox_verdict
+        from wukong.cli import _sandbox_verdict
 
         verdict = _sandbox_verdict(
             self._selection(),
@@ -618,7 +618,7 @@ class TestVerdictDistinguishesEnvironments:
         assert "normal terminal" in verdict
 
     def test_a_working_probe_short_circuits(self) -> None:
-        from unified_agent.cli import _sandbox_verdict
+        from wukong.cli import _sandbox_verdict
 
         verdict = _sandbox_verdict(
             self._selection(),
@@ -631,7 +631,7 @@ class TestVerdictDistinguishesEnvironments:
 
     def test_the_verdict_still_defaults_environment_to_absent(self) -> None:
         """Callers that predate the environment argument must not crash."""
-        from unified_agent.cli import _sandbox_verdict
+        from wukong.cli import _sandbox_verdict
 
         assert _sandbox_verdict(self._selection(), ProbeResult(False, "x"), [])
 
@@ -644,7 +644,7 @@ class TestProfileBisect:
     """
 
     def _result(self, key: str, ok: bool, live_ok: bool | None = None):  # noqa: ANN202
-        from unified_agent.sandbox import Result
+        from wukong.sandbox import Result
 
         live = []
         if live_ok is not None:
@@ -653,7 +653,7 @@ class TestProfileBisect:
         return Result(key, "q", ok, "applied" if ok else "refused", live)
 
     def test_the_candidate_list_has_two_controls_and_a_live_check(self) -> None:
-        from unified_agent.sandbox import candidates
+        from wukong.sandbox import candidates
 
         keys = [c.key for c in candidates(Path("/tmp/ws"), Path("/tmp/home"))]
         assert keys[0] == "control-allow-default", "a no-op control comes first"
@@ -662,7 +662,7 @@ class TestProfileBisect:
         assert keys[-1] == "generated-full-profile", "reproduce last"
 
     def test_the_candidate_fix_is_tested_live(self) -> None:
-        from unified_agent.sandbox import candidates
+        from wukong.sandbox import candidates
 
         by_key = {c.key: c for c in candidates(Path("/tmp/ws"), Path("/tmp/home"))}
         assert by_key["allow-default-deny-write-reallow"].live is not None
@@ -670,7 +670,7 @@ class TestProfileBisect:
         assert "(deny file-write*)" in by_key["allow-default-deny-write-reallow"].profile
 
     def test_no_op_control_failing_means_the_environment_cannot_diagnose(self) -> None:
-        from unified_agent.sandbox import conclude
+        from wukong.sandbox import conclude
 
         text = conclude([self._result("control-allow-default", False)])
         assert "cannot apply any profile" in text
@@ -680,7 +680,7 @@ class TestProfileBisect:
         """The bug this guards: `(allow default)` passing proves only that a
         no-op is accepted. Reading that as the control misdiagnoses a nested
         environment as "deny-default is the trigger"."""
-        from unified_agent.sandbox import conclude
+        from wukong.sandbox import conclude
 
         text = conclude(
             [
@@ -693,7 +693,7 @@ class TestProfileBisect:
         assert "deny default" not in text.lower().split("cannot")[0]
 
     def test_deny_default_alone_is_identified_as_the_trigger(self) -> None:
-        from unified_agent.sandbox import conclude
+        from wukong.sandbox import conclude
 
         text = conclude(
             [
@@ -707,7 +707,7 @@ class TestProfileBisect:
         assert "explicit denies" in text
 
     def test_a_working_deny_default_points_at_the_generated_profile(self) -> None:
-        from unified_agent.sandbox import conclude
+        from wukong.sandbox import conclude
 
         text = conclude(
             [
@@ -721,7 +721,7 @@ class TestProfileBisect:
 
     def test_an_escape_failure_blocks_adopting_the_fallback(self) -> None:
         """Applying is not enough; it has to still block the write."""
-        from unified_agent.sandbox import conclude
+        from wukong.sandbox import conclude
 
         text = conclude(
             [
@@ -735,7 +735,7 @@ class TestProfileBisect:
         assert "must not be adopted" in text
 
     def test_everything_applying_is_reported_as_environment_specific(self) -> None:
-        from unified_agent.sandbox import conclude
+        from wukong.sandbox import conclude
 
         text = conclude(
             [
@@ -759,12 +759,12 @@ class TestBisectFailureModes:
     """
 
     def _seatbelt_available(self) -> bool:
-        from unified_agent.sandbox.diagnose import SEATBELT_BIN
+        from wukong.sandbox.diagnose import SEATBELT_BIN
 
         return Path(SEATBELT_BIN).exists()
 
     def test_a_malformed_profile_is_labelled_as_such(self) -> None:
-        from unified_agent.sandbox import Candidate, run_candidate
+        from wukong.sandbox import Candidate, run_candidate
 
         result = run_candidate(
             Candidate(
@@ -780,7 +780,7 @@ class TestBisectFailureModes:
             assert "MALFORMED" in result.detail or "unbound variable" in result.detail
 
     def test_an_unclosed_paren_is_reported_as_syntax(self) -> None:
-        from unified_agent.sandbox import Candidate, run_candidate
+        from wukong.sandbox import Candidate, run_candidate
 
         result = run_candidate(
             Candidate(key="unclosed", question="?", profile="(version 1)\n(deny default\n")
@@ -792,7 +792,7 @@ class TestBisectFailureModes:
     def test_a_valid_profile_is_not_labelled_malformed(self) -> None:
         """The distinction has to hold in both directions: a profile refused
         for permission reasons must not be reported as malformed."""
-        from unified_agent.sandbox import Candidate, run_candidate
+        from wukong.sandbox import Candidate, run_candidate
 
         result = run_candidate(
             Candidate(key="valid", question="?", profile="(version 1)\n(deny default)\n")
@@ -800,7 +800,7 @@ class TestBisectFailureModes:
         assert "MALFORMED" not in result.detail
 
     def test_every_candidate_produces_a_result(self, tmp_path: Path) -> None:
-        from unified_agent.sandbox import candidates, run_candidate
+        from wukong.sandbox import candidates, run_candidate
 
         for candidate in candidates(tmp_path / "ws", tmp_path / "home"):
             result = run_candidate(candidate)

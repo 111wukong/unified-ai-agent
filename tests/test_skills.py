@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.skills.loader import (
+from wukong.skills.loader import (
     SkillError,
     parse_skill_file,
     review_skill,
 )
-from unified_agent.skills.registry import SkillRegistry
-from unified_agent.tools.base import ToolContext
-from unified_agent.tools.memory_tools import LoadSkillTool
+from wukong.skills.registry import SkillRegistry
+from wukong.tools.base import ToolContext
+from wukong.tools.memory_tools import LoadSkillTool
 
 
 def write_skill(root: Path, name: str, frontmatter: str, body: str = "# body\n") -> Path:
@@ -473,11 +473,11 @@ class TestStoredLadder:
     is not a promotion."""
 
     def test_a_promotion_survives_a_new_registry(self, tmp_path: Path) -> None:
-        from unified_agent.storage.store import Store
+        from wukong.storage.store import Store
 
         candidates = tmp_path / "skills-candidates"
         write_skill(candidates, "climber", "name: climber\ndescription: Something useful.\n")
-        store = Store(tmp_path / "uaa.db")
+        store = Store(tmp_path / "wukong.db")
         try:
             first = SkillRegistry(
                 [],
@@ -514,11 +514,11 @@ class TestStoredLadder:
         the persist path has to upsert -- otherwise the first promotion of
         every skill silently does nothing.
         """
-        from unified_agent.storage.store import Store
+        from wukong.storage.store import Store
 
         candidates = tmp_path / "skills-candidates"
         write_skill(candidates, "fresh", "name: fresh\ndescription: Just written.\n")
-        store = Store(tmp_path / "uaa.db")
+        store = Store(tmp_path / "wukong.db")
         try:
             registry = SkillRegistry(
                 [],
@@ -544,9 +544,9 @@ class TestStoredLadder:
     def test_skill_runs_are_readable_and_grouped(self, tmp_path: Path) -> None:
         """The evidence half of the loop. `skill_runs` was a write-only table
         while the schema promised it answered "does this skill ever help?"."""
-        from unified_agent.storage.store import Store
+        from wukong.storage.store import Store
 
-        store = Store(tmp_path / "uaa.db")
+        store = Store(tmp_path / "wukong.db")
         try:
             store.record_skill_run(skill_name="reviewer", task_id="t1", outcome="completed")
             store.record_skill_run(skill_name="reviewer", task_id="t2", outcome="failed")

@@ -146,7 +146,7 @@ class ModelCapabilities:
 - 规范里**已经有** `allowed-tools` 字段，正好一对一映射到本项目的权限引擎——"技能不能偷偷扩权"因此是规范级保证，而不是我需要额外发明的功能；
 - 渐进披露也是规范里定义好的：启动只加载 `name`+`description`（每技能约 100 token），正文由 `load_skill` 工具按需拉取。
 
-技能状态阶梯（`candidate → validated → approved → active`）是**强制**的，而且**禁止跳级**——每一级是一次独立判断（能否解析 / 是否正确 / 人是否接受 / 能否运行），允许 `candidate → active` 会让中间两级变成装饰。Agent 自己写的技能落在 `$UAA_HOME/skills-candidates/`，**不在搜索路径里**，所以它天然无法自动生效。
+技能状态阶梯（`candidate → validated → approved → active`）是**强制**的，而且**禁止跳级**——每一级是一次独立判断（能否解析 / 是否正确 / 人是否接受 / 能否运行），允许 `candidate → active` 会让中间两级变成装饰。Agent 自己写的技能落在 `$WUKONG_HOME/skills-candidates/`，**不在搜索路径里**，所以它天然无法自动生效。
 
 ### (2) 配置：结构化用 TOML，不用 `pydantic-settings` 一把梭
 
@@ -219,7 +219,7 @@ MCP 在 **2026-07-28** 做了它自称"标准历史上最大的一次修订"：*
 风险最高的不是缺功能，是**语义没被真实流量验证过**。所以：
 
 1. **用真实模型跑 10 个真实任务**（就你手头的项目），看三件事：规划质量、工具选择准确率、成本。这一步会告诉你上下文预算的阈值定得对不对——目前是拍的。
-2. **故意打断**：`kill -9` 一个正在跑 `run_command` 的任务，然后 `uaa task resume`。确认那条 "outcome UNKNOWN" 警告在真实模型面前能不能被正确理解（这是最可能被模型忽略的一条指令）。
+2. **故意打断**：`kill -9` 一个正在跑 `run_command` 的任务，然后 `wukong task resume`。确认那条 "outcome UNKNOWN" 警告在真实模型面前能不能被正确理解（这是最可能被模型忽略的一条指令）。
 3. **再谈多 Agent**。等你有了 10 个任务的真实日志，你才知道该拆哪一步。现在拆是猜。
 4. 最后才是 Phase 2 的 API/WebSocket——**没有前 3 步的数据，API 的形状也是猜的**。
 

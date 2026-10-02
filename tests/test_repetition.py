@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from unified_agent.agent import repetition
-from unified_agent.agent.context import ContextBuilder
-from unified_agent.agent.repetition import call_signature, result_digest
-from unified_agent.agent.state import AgentState, LogEntry, TaskStatus, replay
-from unified_agent.observability.events import EventType
+from wukong.agent import repetition
+from wukong.agent.context import ContextBuilder
+from wukong.agent.repetition import call_signature, result_digest
+from wukong.agent.state import AgentState, LogEntry, TaskStatus, replay
+from wukong.observability.events import EventType
 
 
 # ---------------------------------------------------------------------------

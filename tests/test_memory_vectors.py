@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.memory import (
+from wukong.memory import (
     Candidate,
     MemoryCurator,
     MemoryService,
@@ -22,7 +22,7 @@ from unified_agent.memory import (
     build_embeddings,
     build_memory_service,
 )
-from unified_agent.memory.embeddings import (
+from wukong.memory.embeddings import (
     HashingEmbeddings,
     NullEmbeddings,
     OpenAICompatEmbeddings,
@@ -30,7 +30,7 @@ from unified_agent.memory.embeddings import (
     pack_vector,
     unpack_vector,
 )
-from unified_agent.storage.store import Store
+from wukong.storage.store import Store
 
 
 @pytest.fixture
@@ -94,7 +94,7 @@ class TestHashingEmbeddings:
         script = (
             "import asyncio, sys;"
             "sys.path.insert(0, %r);"
-            "from unified_agent.memory.embeddings import HashingEmbeddings;"
+            "from wukong.memory.embeddings import HashingEmbeddings;"
             "p = HashingEmbeddings(dim=64);"
             "v = asyncio.run(p.embed(['deterministic across processes']))[0];"
             "print(sum(v))"
@@ -341,7 +341,7 @@ class _Judge:
         self._json = json
 
     async def chat(self, messages, **kwargs):  # noqa: ANN001, ANN201
-        from unified_agent.types import ModelResponse, TokenUsage
+        from wukong.types import ModelResponse, TokenUsage
 
         self.calls += 1
         return ModelResponse(
@@ -537,9 +537,9 @@ class TestMemoryService:
         self, settings, monkeypatch
     ) -> None:  # noqa: ANN001
         """Configured but unusable must degrade, not fail every task."""
-        monkeypatch.delenv("UAA_TEST_EMBED_KEY", raising=False)
+        monkeypatch.delenv("WUKONG_TEST_EMBED_KEY", raising=False)
         settings.memory.embedding_model = "text-embedding-3-small"
-        settings.memory.embedding_api_key_env = "UAA_TEST_EMBED_KEY"
+        settings.memory.embedding_api_key_env = "WUKONG_TEST_EMBED_KEY"
         settings.memory.embedding_base_url = None
         store = Store(settings.db_path)
         try:
@@ -582,7 +582,7 @@ class TestSupersedeIsOffByDefault:
     async def test_the_prompt_and_schema_do_not_offer_the_action(self) -> None:
         """Narrowing the enum rather than rejecting the answer afterwards: a
         model that is offered `update` will use it."""
-        from unified_agent.memory.extract import (
+        from wukong.memory.extract import (
             CURATOR_PROMPT,
             CURATOR_PROMPT_SUPERSEDE,
             curator_schema,
@@ -626,8 +626,8 @@ class TestSupersedeIsOffByDefault:
 class TestSaveMemoryToolIntegration:
     async def test_the_tool_reports_which_verdict_it_got(self, store: Store) -> None:
         """'saved' and 'replaced an older fact' are different outcomes."""
-        from unified_agent.tools.base import ToolContext
-        from unified_agent.tools.memory_tools import SaveMemoryTool
+        from wukong.tools.base import ToolContext
+        from wukong.tools.memory_tools import SaveMemoryTool
 
         old = store.add_memory(content="项目用 pytest 跑测试")
         judge = _Judge({"action": "update", "target_id": old, "reason": "migrated"})

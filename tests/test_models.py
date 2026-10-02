@@ -6,18 +6,18 @@ import json
 
 import pytest
 
-from unified_agent.config import ModelSpec
-from unified_agent.errors import ConfigError, ModelError
-from unified_agent.models.base import (
+from wukong.config import ModelSpec
+from wukong.errors import ConfigError, ModelError
+from wukong.models.base import (
     ModelCapabilities,
     TextProtocolModel,
     estimate_tokens,
     parse_text_tool_calls,
     render_text_protocol,
 )
-from unified_agent.models.mock import MockModel
-from unified_agent.models.registry import build_model
-from unified_agent.types import Message, ModelResponse, TokenUsage, ToolCall
+from wukong.models.mock import MockModel
+from wukong.models.registry import build_model
+from wukong.types import Message, ModelResponse, TokenUsage, ToolCall
 
 
 class TestCapabilities:
@@ -257,17 +257,17 @@ class TestMockModel:
 
 class TestRegistry:
     def test_missing_api_key_is_a_clear_error(self, settings) -> None:  # noqa: ANN001
-        from unified_agent.models.registry import ModelRegistry
+        from wukong.models.registry import ModelRegistry
 
         settings.models["needs_key"] = ModelSpec(
-            provider="openai_compat", model="gpt-4.1", api_key_env="UAA_TEST_MISSING_KEY"
+            provider="openai_compat", model="gpt-4.1", api_key_env="WUKONG_TEST_MISSING_KEY"
         )
         registry = ModelRegistry(settings)
         with pytest.raises(ModelError, match="needs an API key"):
             registry.get("needs_key")
 
     def test_unknown_alias_lists_known_aliases(self, settings) -> None:  # noqa: ANN001
-        from unified_agent.models.registry import ModelRegistry
+        from wukong.models.registry import ModelRegistry
 
         registry = ModelRegistry(settings)
         with pytest.raises(ConfigError, match="not configured"):

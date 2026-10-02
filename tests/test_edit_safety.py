@@ -23,8 +23,8 @@ from pathlib import Path
 
 import pytest
 
-from unified_agent.tools.base import ToolContext
-from unified_agent.tools.fs import ApplyPatchTool, WriteFileTool
+from wukong.tools.base import ToolContext
+from wukong.tools.fs import ApplyPatchTool, WriteFileTool
 
 
 def ctx_for(workspace: Path, home: Path) -> ToolContext:

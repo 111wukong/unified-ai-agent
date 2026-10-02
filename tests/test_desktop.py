@@ -4,7 +4,7 @@ What is verifiable here and what is not, stated plainly: the *window* cannot
 be opened in a headless environment, so no test asserts that a window
 appeared. Everything around it can be, and is -- the server lifecycle the
 window wraps, port selection, the health gate, the bundle layout and its
-Info.plist, and the generated icon bytes. `uaa desktop --check` exercises the
+Info.plist, and the generated icon bytes. `wukong desktop --check` exercises the
 same lifecycle outside the test suite.
 
 None of these tests need pywebview installed: the module imports it lazily so
@@ -27,10 +27,10 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from unified_agent.agent.factory import build_agent
-from unified_agent.api.app import Service
-from unified_agent.desktop import bundle as bundle_mod
-from unified_agent.desktop.launcher import (
+from wukong.agent.factory import build_agent
+from wukong.api.app import Service
+from wukong.desktop import bundle as bundle_mod
+from wukong.desktop.launcher import (
     DesktopUnavailable,
     ServerHandle,
     desktop_available,
@@ -86,7 +86,7 @@ class TestHealthGate:
 
 
 class TestServerLifecycle:
-    """The part `uaa desktop` actually depends on."""
+    """The part `wukong desktop` actually depends on."""
 
     def test_start_stop_round_trip_and_the_token_guard(self, settings) -> None:  # noqa: ANN001
         from tests.conftest import ScriptedModel, ScriptedModels
@@ -110,7 +110,7 @@ class TestServerLifecycle:
 
             authorised = Request(
                 f"{handle.base_url}/api/v1/health",
-                headers={"X-UAA-Token": "secret-token"},
+                headers={"X-WUKONG-Token": "secret-token"},
             )
             with urlopen(authorised, timeout=5) as response:
                 body = json.loads(response.read())
@@ -249,7 +249,7 @@ class TestAppBundle:
 
         script = executable.read_text(encoding="utf-8")
         assert script.startswith("#!/bin/sh")
-        assert "-m unified_agent.desktop" in script
+        assert "-m wukong.desktop" in script
         # A double-clicked app that does nothing is the worst outcome, so the
         # script has to explain a missing interpreter rather than exit quietly.
         assert "is missing" in script

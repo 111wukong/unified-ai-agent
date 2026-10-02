@@ -4,7 +4,7 @@ description: Review a code change and report findings by severity. Use when the 
 license: MIT
 allowed-tools: read_file list_directory search_files git_status git_diff run_tests
 metadata:
-  author: unified-ai-agent
+  author: wukong
   version: "1.0"
 ---
 
