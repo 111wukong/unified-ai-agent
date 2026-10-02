@@ -968,6 +968,93 @@ class TestWorkspaceFiles:
         assert body["budgets"]["max_steps"] > 0
 
 
+class TestFileEditing:
+    """The editor, and the rule that makes it safe.
+
+    The rule is not "who wins" -- it is "there is only ever one writer". While
+    the agent has the workspace, it has it. The agent holds observations of
+    these files in its context, and a file changed underneath it turns those
+    observations into a lie it will act on: `apply_patch` fails loudly on a
+    mismatch, but a decision already made from stale content does not.
+    """
+
+    def test_a_save_lands_and_the_digest_changes(self, api, workspace) -> None:
+        (workspace / "notes.md").write_text("before\n", encoding="utf-8")
+
+        with api([]) as client:
+            opened = client.get("/api/v1/files/content", params={"path": "notes.md"}).json()
+            saved = client.put(
+                "/api/v1/files/content",
+                json={"path": "notes.md", "text": "after\n", "base_sha": opened["sha"]},
+            )
+
+        assert saved.status_code == 200, saved.text
+        assert (workspace / "notes.md").read_text(encoding="utf-8") == "after\n"
+        assert saved.json()["sha"] != opened["sha"]
+
+    def test_a_write_is_refused_while_a_task_is_running(self, api, workspace) -> None:
+        """The whole consistency story, in one assertion."""
+        (workspace / "notes.md").write_text("before\n", encoding="utf-8")
+
+        client = api([])
+        with client:
+            client.app.state.svc.running["task_x"] = object()
+            try:
+                response = client.put(
+                    "/api/v1/files/content",
+                    json={"path": "notes.md", "text": "sneaky\n"},
+                )
+            finally:
+                client.app.state.svc.running.clear()
+
+        assert response.status_code == 409
+        assert (workspace / "notes.md").read_text(encoding="utf-8") == "before\n"
+
+    def test_a_save_over_a_changed_file_is_refused(self, api, workspace) -> None:
+        """The optimistic lock. Without it a save silently discards whatever
+        wrote in between -- the agent, another tab, or the user's terminal."""
+        target = workspace / "notes.md"
+        target.write_text("before\n", encoding="utf-8")
+
+        with api([]) as client:
+            opened = client.get("/api/v1/files/content", params={"path": "notes.md"}).json()
+            target.write_text("written by someone else\n", encoding="utf-8")
+            response = client.put(
+                "/api/v1/files/content",
+                json={"path": "notes.md", "text": "mine\n", "base_sha": opened["sha"]},
+            )
+
+        assert response.status_code == 409
+        assert target.read_text(encoding="utf-8") == "written by someone else\n"
+
+    def test_a_path_outside_the_workspace_is_refused(self, api) -> None:
+        with api([]) as client:
+            response = client.put(
+                "/api/v1/files/content",
+                json={"path": "../../../tmp/evil.txt", "text": "x"},
+            )
+
+        assert response.status_code == 400
+
+    def test_a_directory_is_not_a_file(self, api, workspace) -> None:
+        (workspace / "a_dir").mkdir()
+
+        with api([]) as client:
+            response = client.put(
+                "/api/v1/files/content", json={"path": "a_dir", "text": "x"}
+            )
+
+        assert response.status_code == 404
+
+    def test_the_read_hands_back_a_digest_to_send_on_save(self, api, workspace) -> None:
+        (workspace / "notes.md").write_text("x\n", encoding="utf-8")
+
+        with api([]) as client:
+            body = client.get("/api/v1/files/content", params={"path": "notes.md"}).json()
+
+        assert body["sha"]
+
+
 class TestFilePreview:
     """The read-only preview pane. It must not be able to change anything --
     the agent may be mid-run holding a file it has already read, and an editor

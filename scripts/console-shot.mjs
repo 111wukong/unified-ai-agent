@@ -241,6 +241,14 @@ async function main() {
       await sleep(1200);
     }
 
+    if (process.env.SHOT_EDIT) {
+      await client.send("Runtime.evaluate", {
+        expression: "startEditing()",
+        returnByValue: true,
+      });
+      await sleep(400);
+    }
+
     const report = await client.send("Runtime.evaluate", {
       expression: `(function () {
         try {

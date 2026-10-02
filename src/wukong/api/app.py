@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextlib as _contextlib
+import hashlib
 import json
 import secrets
 from pathlib import Path
@@ -94,6 +95,16 @@ class AgUiMessage(BaseModel):
     role: Literal["user", "assistant", "system", "tool", "developer"]
     content: str = ""
     id: str | None = None
+
+
+class FileWrite(BaseModel):
+    """A save from the console's file editor."""
+
+    path: str
+    text: str
+    #: The digest the editor was handed when it opened the file. Sending it
+    #: back is what turns "save" into "save, if nothing else moved first".
+    base_sha: str | None = None
 
 
 class AgUiRunInput(BaseModel):
@@ -329,7 +340,55 @@ def create_app(
             "text": raw.decode("utf-8", errors="replace"),
             "binary": False,
             "reason": "",
+            # Returned so an editor can send it back on save. Without it there
+            # is no way to tell "the file I opened" from "the file as it is
+            # now", and a save silently discards whatever happened between.
+            "sha": _digest(raw),
         }
+
+    @app.put("/api/v1/files/content")
+    async def write_file(payload: FileWrite) -> dict[str, Any]:
+        """Write a text file from the console's editor.
+
+        **Refused outright while a task is running**, and that refusal *is* the
+        consistency design. The agent holds observations of these files in its
+        context; a file changed underneath it turns those observations into a
+        lie it will act on. `apply_patch` fails loudly on a mismatch, but a
+        decision already made from stale content does not -- by the time the
+        write lands, the reasoning that produced it is already wrong.
+
+        So the rule is not "who wins", it is "there is only ever one writer".
+        While the agent has the workspace, it has it.
+        """
+        if svc.running:
+            raise HTTPException(
+                status_code=409,
+                detail="有任务正在运行，工作区归它使用。等它结束后再编辑。",
+            )
+
+        root = Path(svc.settings.workspace).resolve()
+        target = (root / payload.path).resolve()
+        if target != root and root not in target.parents:
+            raise HTTPException(status_code=400, detail="path escapes the workspace")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"not a file: {payload.path}")
+
+        encoded = payload.text.encode("utf-8")
+        if len(encoded) > _PREVIEW_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"内容 {len(encoded)} 字节，超过编辑上限 {_PREVIEW_MAX_BYTES}",
+            )
+
+        current = _digest(target.read_bytes())
+        if payload.base_sha and payload.base_sha != current:
+            raise HTTPException(
+                status_code=409,
+                detail="这个文件在打开之后被改过。重新打开再编辑，否则会覆盖掉那次改动。",
+            )
+
+        target.write_text(payload.text, encoding="utf-8")
+        return {"path": payload.path, "size": len(encoded), "sha": _digest(encoded)}
 
     # -- sessions ---------------------------------------------------------
     @app.post("/api/v1/sessions")
@@ -942,6 +1001,16 @@ async def _agui_stream(svc: Service, payload: AgUiRunInput) -> AsyncIterator[str
 #: it. Half a megabyte is roughly where a `<pre>` stops being scrollable and
 #: starts being a frozen tab.
 _PREVIEW_MAX_BYTES = 512 * 1024
+
+
+def _digest(raw: bytes) -> str:
+    """A short content digest, for the editor's optimistic lock.
+
+    Short on purpose: it is shown to nobody and compared only for equality, so
+    sixteen hex characters are as good as sixty-four and cheaper to carry
+    around in a request body.
+    """
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def _file_sort_key(entry: Path) -> tuple[int, str]:

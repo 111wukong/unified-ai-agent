@@ -16,6 +16,17 @@ const state = {
   taskId: null,
   // Per-run render targets, reset on each RUN_STARTED.
   current: null,
+  // Preview pane. The text and the lock live here rather than in the DOM, so
+  // a save sends back what it opened instead of what the view happens to say.
+  previewPath: null,
+  previewText: "",
+  previewSha: null,
+  previewEditable: false,
+  // Tasks running anywhere in this process, from /health. The tab's own run is
+  // tracked locally; this catches the ones it did not start -- the agent is a
+  // single in-process object, so a run started from the CLI holds the
+  // workspace too.
+  runningTasks: 0,
   _running: false,
   get running() {
     return this._running;
@@ -1029,9 +1040,8 @@ function skillRow(skill) {
  * has answered -- whose version wins, and what happens to the agent's belief
  * about the file when it loses. A window cannot race anything. */
 async function openPreview(path) {
-  const pane = $("preview");
   const body = $("preview-body");
-  pane.hidden = false;
+  $("preview").hidden = false;
   $("app").classList.add("with-preview");
   setText($("preview-path"), path);
   setText($("preview-meta"), "");
@@ -1041,18 +1051,113 @@ async function openPreview(path) {
   try {
     payload = await json(`/api/v1/files/content?path=${encodeURIComponent(path)}`);
   } catch (error) {
+    state.previewPath = null;
     body.replaceChildren(
       el("div", "preview-note error", `读取失败：${error.message || error}`),
     );
+    renderPreviewActions();
     return;
   }
 
+  // The source and the lock are kept here rather than read back out of the
+  // DOM: the rendered view has line numbers woven through it, and un-weaving
+  // them is a parser where a variable will do.
+  state.previewPath = path;
+  state.previewText = payload.text || "";
+  state.previewSha = payload.sha || null;
+  state.previewEditable = !payload.binary && !payload.reason;
+
   setText($("preview-meta"), formatBytes(payload.size));
+  // Asked now rather than cached from boot: a task may have started since,
+  // and the answer decides whether the edit button is usable at all.
+  await refreshRunningCount();
+  renderPreviewActions();
   if (!payload.text) {
     body.replaceChildren(el("div", "preview-note", payload.reason || "（空文件）"));
     return;
   }
   body.replaceChildren(renderCode(payload.text));
+}
+
+/* Which buttons belong in the header right now.
+ *
+ * The edit button is disabled while a task is running, and the tooltip says
+ * why. A disabled control with no explanation is a bug report waiting to
+ * happen -- and this particular disabled control is load-bearing, so the
+ * reason is the most important thing on screen.
+ *
+ * The count comes from the server, not from the local run flag. The agent is
+ * one in-process object, so a run started from the CLI holds the workspace
+ * just as much as one started here, and the server is the one that will
+ * refuse the write. Consulting the local flag would show an enabled button
+ * for a save that cannot land. */
+function renderPreviewActions(editing = false) {
+  const busy = state.runningTasks > 0;
+  const canEdit = Boolean(state.previewPath) && state.previewEditable;
+
+  const edit = $("preview-edit");
+  edit.hidden = editing || !canEdit;
+  edit.disabled = busy;
+  setTitle(edit, busy ? "有任务正在运行，工作区归它使用" : "编辑这个文件");
+
+  $("preview-save").hidden = !editing;
+  $("preview-cancel").hidden = !editing;
+}
+
+async function refreshRunningCount() {
+  try {
+    state.runningTasks = (await json("/api/v1/health")).running_tasks || 0;
+  } catch {
+    // If health is unreachable the button stays as it was. The server refuses
+    // the write either way, so a stale count is a hint, not a hole.
+  }
+}
+
+function startEditing() {
+  const area = el("textarea", "preview-editor");
+  area.value = state.previewText;
+  area.spellcheck = false;
+  $("preview-body").replaceChildren(area);
+  area.focus();
+  renderPreviewActions(true);
+}
+
+function cancelEditing() {
+  openPreview(state.previewPath).catch((error) => console.warn("reload failed", error));
+}
+
+async function saveEditing() {
+  const area = $("preview-body").querySelector(".preview-editor");
+  if (!area || !state.previewPath) return;
+
+  const save = $("preview-save");
+  save.disabled = true;
+  setText(save, "保存中…");
+  try {
+    await json("/api/v1/files/content", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: state.previewPath,
+        text: area.value,
+        // Sent back so a save over a file that moved in the meantime is
+        // refused instead of silently winning.
+        base_sha: state.previewSha,
+      }),
+    });
+  } catch (error) {
+    // Both 409s mean the same thing to a reader: this save should not land.
+    // The server's sentence already says which case it is.
+    setText(save, "保存失败，见下方");
+    $("preview-body").prepend(
+      el("div", "preview-note error", String(error.message || error)),
+    );
+    save.disabled = false;
+    return;
+  }
+  setText(save, "保存");
+  save.disabled = false;
+  await openPreview(state.previewPath);
 }
 
 function closePreview() {
@@ -1323,6 +1428,11 @@ async function boot() {
     const health = await json("/api/v1/health");
     $("version").textContent = health.version;
     if (health.default_model) $("model").value = health.default_model;
+    // The agent is one in-process object, so a run started from the CLI holds
+    // the workspace just as much as one started here. Read it once at boot and
+    // let the server be the authority on the rest -- it refuses writes while
+    // anything is running, which is the guarantee; this is only the hint.
+    state.runningTasks = health.running_tasks || 0;
     if (health.token_required && !TOKEN) {
       // Say it here rather than letting every action fail with a 403.
       addTurn("error", "错误").append(
@@ -1436,6 +1546,9 @@ $("btn-approve").onclick = () => decide("approve");
 $("btn-deny").onclick = () => decide("deny");
 $("btn-cancel").onclick = cancel;
 $("preview-close").onclick = closePreview;
+$("preview-edit").onclick = startEditing;
+$("preview-save").onclick = () => saveEditing().catch((error) => console.warn(error));
+$("preview-cancel").onclick = cancelEditing;
 // Escape closes the preview, but not while a run is asking for approval --
 // dismissing the panel must never be the same gesture as answering it.
 document.addEventListener("keydown", (event) => {
