@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 
 from wukong.config import ModelSpec
 from wukong.errors import ConfigError, ModelError
+from wukong.models.openai_compat import OpenAICompatModel
 from wukong.models.base import (
     ModelCapabilities,
     TextProtocolModel,
@@ -285,3 +287,193 @@ class TestTokenEstimation:
             Message(role="assistant", tool_calls=[ToolCall(id="1", name="read_file", arguments={"path": "a"})])
         ]
         assert model.count_messages(messages) > 5
+
+
+class TestStreamingProvider:
+    """The SSE path.
+
+    Coverage put this file at 53% with the entire streaming parser
+    unexercised -- and that parser is the one the console uses. It also has the
+    most ways to be subtly wrong, because a tool call arrives in pieces: the
+    name in one chunk, the arguments in the next, tied together only by an
+    index the caller never sees.
+    """
+
+    @staticmethod
+    def _model() -> OpenAICompatModel:
+        return OpenAICompatModel(
+            ModelSpec(
+                provider="openai_compat",
+                model="gpt-4.1",
+                api_key_env="",
+                base_url="https://example.invalid/v1",
+            )
+        )
+
+    @staticmethod
+    def _client(lines: list[str], status: int = 200) -> httpx.AsyncClient:
+        body = "".join(f"data: {line}\n\n" for line in lines)
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(status, text=body)
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def test_text_deltas_are_joined_and_reported(self) -> None:
+        seen: list[str] = []
+
+        async with self._client(
+            [
+                json.dumps({"choices": [{"delta": {"content": "你好"}}]}),
+                json.dumps({"choices": [{"delta": {"content": "，世界"}}]}),
+                "[DONE]",
+            ]
+        ) as client:
+            response = await self._model()._stream(client, {}, seen.append)
+
+        assert response.content == "你好，世界"
+        assert seen == ["你好", "，世界"]
+
+    async def test_a_tool_call_split_across_chunks_is_reassembled(self) -> None:
+        """The case that only exists when streaming."""
+        async with self._client(
+            [
+                json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "function": {"name": "read_", "arguments": '{"pa'},
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ),
+                json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "function": {
+                                                "name": "file",
+                                                "arguments": 'th": "a.py"}',
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ),
+                "[DONE]",
+            ]
+        ) as client:
+            response = await self._model()._stream(client, {}, lambda _: None)
+
+        assert len(response.tool_calls) == 1
+        assert response.tool_calls[0].name == "read_file"
+        assert response.tool_calls[0].arguments == {"path": "a.py"}
+
+    async def test_two_tool_calls_are_kept_apart_by_index(self) -> None:
+        """Interleaved deltas are legal, and the index is the only thing that
+        says which call a fragment belongs to."""
+        async with self._client(
+            [
+                json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "a",
+                                            "function": {"name": "read_file", "arguments": "{}"},
+                                        },
+                                        {
+                                            "index": 1,
+                                            "id": "b",
+                                            "function": {
+                                                "name": "list_directory",
+                                                "arguments": "{}",
+                                            },
+                                        },
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ),
+                "[DONE]",
+            ]
+        ) as client:
+            response = await self._model()._stream(client, {}, lambda _: None)
+
+        assert [c.name for c in response.tool_calls] == ["read_file", "list_directory"]
+
+    async def test_usage_is_taken_from_the_stream_when_it_arrives(self) -> None:
+        async with self._client(
+            [
+                json.dumps({"choices": [{"delta": {"content": "hi"}}]}),
+                json.dumps(
+                    {
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": 11,
+                            "completion_tokens": 3,
+                            "total_tokens": 14,
+                        },
+                    }
+                ),
+                "[DONE]",
+            ]
+        ) as client:
+            response = await self._model()._stream(client, {}, lambda _: None)
+
+        assert response.usage.prompt_tokens == 11
+        assert response.usage.completion_tokens == 3
+        assert response.usage.total_tokens == 14
+
+    async def test_a_stream_without_usage_still_reports_tokens(self) -> None:
+        """A provider that omits the usage block must not make the run look
+        free -- the budget is enforced on this number."""
+        async with self._client(
+            [
+                json.dumps({"choices": [{"delta": {"content": "一些文字"}}]}),
+                "[DONE]",
+            ]
+        ) as client:
+            response = await self._model()._stream(client, {}, lambda _: None)
+
+        assert response.usage.completion_tokens > 0
+        assert response.usage.total_tokens >= response.usage.completion_tokens
+
+    async def test_an_error_status_raises_with_a_reason(self) -> None:
+        """The streaming path is the one the console uses, so a failure here
+        has to carry the same classification as the non-streaming one."""
+        async with self._client(['{"error": "boom"}'], status=401) as client:
+            with pytest.raises(ModelError):
+                await self._model()._stream(client, {}, lambda _: None)
+
+    async def test_junk_lines_are_skipped_rather_than_fatal(self) -> None:
+        """Some gateways emit keep-alive comments and partial frames."""
+        async with self._client(
+            [
+                "",
+                "not json at all",
+                json.dumps({"choices": [{"delta": {"content": "ok"}}]}),
+                "[DONE]",
+            ]
+        ) as client:
+            response = await self._model()._stream(client, {}, lambda _: None)
+
+        assert response.content == "ok"

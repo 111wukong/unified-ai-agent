@@ -15,6 +15,9 @@ skills-candidates/
 # python
 __pycache__/
 *.py[cod]
+.coverage
+coverage.xml
+htmlcov/
 *.egg-info/
 build/
 dist/

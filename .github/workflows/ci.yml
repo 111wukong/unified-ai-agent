@@ -65,6 +65,19 @@ jobs:
         # that needs credentials is a test suite that does not get run.
         run: pytest -q
 
+      - name: Coverage floor
+        # A floor, not a target. Without one, coverage only ever goes down:
+        # each commit takes a little more of it and nobody notices until a
+        # module is at 19% -- which is where cli.py was before this step
+        # existed, and where the entire streaming parser of the default
+        # provider was (53%, with `_stream` untouched, on the path the
+        # console uses).
+        #
+        # Set below the current number on purpose. A floor that has to be
+        # raised by every commit gets lowered instead; one with slack gets
+        # left alone.
+        run: pytest -q --cov=wukong --cov-report=term:skip-covered --cov-fail-under=75
+
       - name: Assert no test was silently skipped
         # A skipped test and a passing test look identical in a green run.
         run: |
