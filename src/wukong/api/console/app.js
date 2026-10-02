@@ -923,6 +923,103 @@ async function decide(verb) {
   }
 }
 
+/* ----------------------------------------------------------------- skills */
+
+/* The human gate.
+ *
+ * `candidate → validated → approved → active` is enforced in the runtime, and
+ * that ladder *is* the safety mechanism: an agent able to promote its own
+ * skill would have no gate at all. A gate reachable only from a terminal is
+ * one that gets bypassed -- by editing the database, or by moving files
+ * around -- so it belongs here.
+ *
+ * The list comes from the registry, not from the `skills` table. The table
+ * only holds skills promoted at least once, so a fresh candidate was
+ * invisible -- which made the gate unreachable, because the one thing needing
+ * a decision was the one thing this pane could not show. */
+
+const PENDING_STATUS = new Set(["candidate", "validated", "approved"]);
+
+/* The next rung. Derived from the ladder rather than from the current status
+ * alone, so adding a rung later is one edit here and nothing else. */
+const NEXT_STATUS = {
+  candidate: "validated",
+  validated: "approved",
+  approved: "active",
+};
+
+const SKILL_TONE = {
+  active: "chip-ok",
+  approved: "chip-accent",
+  validated: "chip-warn",
+  candidate: "chip-warn",
+  deprecated: "",
+};
+
+async function loadSkills() {
+  const list = $("skills");
+  let skills;
+  try {
+    skills = await json("/api/v1/skills");
+  } catch (error) {
+    list.replaceChildren(el("div", "skill-error", `读取失败：${error.message || error}`));
+    return;
+  }
+
+  setText($("skill-count"), skills.length ? String(skills.length) : "");
+  // A closed drawer hides the one thing that needs a decision. It opens for
+  // anything waiting, and only then -- a drawer that opens itself for no
+  // reason is noise.
+  if (skills.some((skill) => PENDING_STATUS.has(skill.status))) {
+    $("skills-fold").open = true;
+  }
+
+  list.replaceChildren();
+  if (!skills.length) {
+    list.append(el("div", "skill-empty", "还没有技能。"));
+    return;
+  }
+  for (const skill of skills) list.append(skillRow(skill));
+}
+
+function skillRow(skill) {
+  const row = el("div", `skill-row status-${skill.status}`);
+  const head = el("div", "skill-head");
+  head.append(el("span", "skill-name", skill.name));
+  head.append(el("span", `chip ${SKILL_TONE[skill.status] || ""}`.trim(), skill.status));
+  row.append(head);
+  if (skill.description) row.append(el("div", "skill-desc", skill.description));
+
+  const next = NEXT_STATUS[skill.status];
+  if (!next) return row;
+
+  const actions = el("div", "skill-actions");
+  const button = el("button", "btn btn-ghost skill-promote", `晋级为 ${next}`);
+  button.type = "button";
+  button.onclick = async (event) => {
+    // The row is not clickable today, but stopping the event here means it can
+    // become so without this button silently triggering it as well.
+    event.stopPropagation();
+    button.disabled = true;
+    setText(button, "处理中…");
+    try {
+      await json(`/api/v1/skills/${encodeURIComponent(skill.name)}/promote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: next }),
+      });
+    } catch (error) {
+      setText(button, `失败：${error.message || error}`);
+      button.disabled = false;
+      return;
+    }
+    loadSkills();
+  };
+  actions.append(button);
+  row.append(actions);
+  return row;
+}
+
 /* ----------------------------------------------------------------- preview */
 
 /* A read-only look at one file.
@@ -1250,6 +1347,7 @@ async function boot() {
   // Loaded after the task list, not before: the list is what the page is for,
   // and a slow directory read must not hold it up.
   loadTree().catch((error) => console.warn("tree unavailable", error));
+  loadSkills().catch((error) => console.warn("skills unavailable", error));
   // Open the most recent task on load, so the page shows where you left off
   // instead of an empty pane above a task list that has things in it.
   if (state.taskId) {

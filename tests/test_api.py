@@ -1021,3 +1021,63 @@ class TestFilePreview:
 
         assert body["text"] == ""
         assert "600" in body["reason"] or "614400" in body["reason"]
+
+
+class TestSkillGate:
+    """The console's skill pane, and the ladder behind it.
+
+    `candidate → validated → approved → active` is the safety mechanism: an
+    agent able to promote its own skill would have no gate at all. A gate
+    reachable only from a terminal is one that gets bypassed -- by editing the
+    database, or by moving files around.
+    """
+
+    @staticmethod
+    def _write_candidate(settings, name: str = "demo") -> None:
+        root = settings.home / "skills-candidates" / name
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: 演示用技能。当用户说要演示时使用。\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+
+    def test_a_candidate_is_visible_before_it_is_promoted(self, api, settings) -> None:
+        """The gap this covers: the list used to read the `skills` table, which
+        only holds skills promoted at least once. A fresh candidate was
+        therefore invisible -- so the one thing that needed a human decision
+        was the one thing the pane could not show."""
+        self._write_candidate(settings)
+
+        with api([]) as client:
+            listed = {s["name"]: s for s in client.get("/api/v1/skills").json()}
+
+        assert listed["demo"]["status"] == "candidate"
+        assert listed["demo"]["source"] == "candidate"
+
+    def test_pending_lists_what_is_waiting_on_a_human(self, api, settings) -> None:
+        self._write_candidate(settings, "waiting")
+
+        with api([]) as client:
+            pending = client.get("/api/v1/skills/pending").json()
+
+        assert [s["name"] for s in pending] == ["waiting"]
+
+    def test_promotion_moves_one_rung_and_is_visible_afterwards(self, api, settings) -> None:
+        self._write_candidate(settings, "climber")
+
+        with api([]) as client:
+            response = client.post("/api/v1/skills/climber/promote", json={"status": "validated"})
+            assert response.status_code == 200, response.text
+            after = {s["name"]: s["status"] for s in client.get("/api/v1/skills").json()}
+
+        assert after["climber"] == "validated"
+
+    def test_skipping_a_rung_is_refused(self, api, settings) -> None:
+        """Jumping straight to `active` would make the middle rungs decorative,
+        and each rung is supposed to be a separate judgement."""
+        self._write_candidate(settings, "jumper")
+
+        with api([]) as client:
+            response = client.post("/api/v1/skills/jumper/promote", json={"status": "active"})
+
+        assert response.status_code == 400

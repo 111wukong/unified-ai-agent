@@ -302,6 +302,67 @@ input:focus, textarea:focus {
 
 /* ------------------------------------------------------------------- tasks */
 
+/* ------------------------------------------------------------------ skills */
+
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.skill-row {
+  padding: 8px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+/* Waiting on a human is the one state worth marking in the row itself: the
+   chip states it, but a chip is a word and this is a queue you scan. */
+.skill-row.status-candidate,
+.skill-row.status-validated,
+.skill-row.status-approved {
+  border-color: rgba(223, 164, 60, 0.3);
+}
+
+.skill-head { display: flex; align-items: center; gap: 7px; }
+
+.skill-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-desc {
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.skill-actions { margin-top: 7px; display: flex; gap: 6px; }
+.skill-promote { padding: 4px 9px; font-size: 11px; }
+
+.skill-empty,
+.skill-error {
+  padding: 8px 6px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.skill-error { color: var(--danger); }
+
 /* -------------------------------------------------------------------- tree */
 
 .panel-tree {

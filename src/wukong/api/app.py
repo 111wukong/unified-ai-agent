@@ -456,7 +456,40 @@ def create_app(
 
     @app.get("/api/v1/skills")
     async def list_skills() -> list[dict[str, Any]]:
-        return svc.a.store.list_skills()
+        """Every skill the registry knows, including the agent's own candidates.
+
+        This used to read the `skills` table, which only holds skills that have
+        been *promoted* at least once. So a candidate the agent wrote was
+        invisible here -- and the human gate became unreachable, because the
+        one thing that needed a decision was the one thing the console could
+        not show. Reading the registry fixes the direction of the problem: the
+        list is what the runtime can actually see.
+        """
+        return [
+            {
+                "name": skill.name,
+                "status": skill.status,
+                "source": skill.source,
+                "description": skill.description,
+                "path": str(getattr(skill, "path", "")),
+                "allowed_tools": sorted(skill.allowed_tools),
+            }
+            for skill in svc.a.skills.list()
+        ]
+
+    @app.get("/api/v1/skills/pending")
+    async def pending_skills() -> list[dict[str, Any]]:
+        """The ones waiting on a human, nearest-to-running first.
+
+        Its own endpoint rather than a filter on the list, because the console
+        polls this to decide whether to draw attention -- and "is anything
+        waiting for me" should be one cheap question, not a client-side scan
+        that has to know which statuses count.
+        """
+        return [
+            {"name": skill.name, "status": skill.status, "source": skill.source}
+            for skill in svc.a.skills.pending_review()
+        ]
 
     @app.post("/api/v1/skills/{name}/promote")
     async def promote_skill(name: str, payload: SkillPromotion) -> dict[str, Any]:
