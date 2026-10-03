@@ -752,15 +752,27 @@ def task_list(
         table.add_column(column, overflow="fold")
     for row in rows:
         style = STATUS_STYLE.get(row["status"], "white")
+        # `task list` runs in a different process from whatever is executing
+        # the task, so it cannot tell a live run from one a crash left behind
+        # -- both are a `running` row. Marking it as uncertain is better than
+        # implying the number is known: after a SIGKILL the record survives
+        # perfectly and `resume` finishes the job, but nothing on screen says
+        # a resume is available.
+        label = "running?" if row["status"] == "running" else row["status"]
         table.add_row(
             row["id"],
-            f"[{style}]{row['status']}[/{style}]",
+            f"[{style}]{label}[/{style}]",
             str(row["steps_used"]),
             str(row["tokens_in"] + row["tokens_out"]),
             f"${row['cost_usd']:.4f}",
             row["goal"][:60],
         )
     console.print(table)
+    if any(r["status"] == "running" for r in rows):
+        console.print(
+            "[dim]`running?` 表示记录说它在跑。如果是崩溃留下的，"
+            "用 `wukong task resume <id>` 接着跑。[/dim]"
+        )
 
 
 @task_app.command("show")

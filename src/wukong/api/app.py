@@ -440,7 +440,18 @@ def create_app(
 
     @app.get("/api/v1/tasks")
     async def list_tasks(session_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
-        return svc.a.store.list_tasks(session_id=session_id, limit=limit)
+        """Tasks, with `orphaned` marked.
+
+        The rows are the projection -- cheap, and the right source for a list.
+        `orphaned` is the one field that cannot come from it, because it is a
+        fact about *this process* rather than about the task.
+        """
+        rows = svc.a.store.list_tasks(session_id=session_id, limit=limit)
+        for row in rows:
+            row["orphaned"] = (
+                row.get("status") == "running" and row.get("id") not in svc.running
+            )
+        return rows
 
     @app.get("/api/v1/tasks/{task_id}")
     async def get_task(task_id: str) -> dict[str, Any]:
@@ -799,6 +810,13 @@ def _task_view(svc: Service, task_id: str) -> dict[str, Any]:
         "cost_usd": state.usage.cost_usd,
         "answer": state.answer,
         "error": state.error,
+        # `running` means "this process is working on it". After a crash the
+        # row still says `running` and nothing is working on it -- one word for
+        # two situations, and the console cannot tell them apart by reading the
+        # status alone. Verified by SIGKILLing the server mid-task: the record
+        # survived intact and `resume` finished the job, but nothing on screen
+        # said a resume was available, so a user would just wait forever.
+        "orphaned": state.status.value == "running" and task_id not in svc.running,
         "plan": [
             {"id": s.id, "description": s.description, "status": s.status.value}
             for s in state.plan

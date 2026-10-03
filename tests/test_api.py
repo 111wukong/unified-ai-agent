@@ -1057,6 +1057,99 @@ class TestFileEditing:
         assert body["sha"]
 
 
+def _seed_orphan(settings) -> str:  # noqa: ANN001
+    """A `running` row with nothing behind it -- the state a crash leaves.
+
+    Written straight into the log rather than produced by running something: a
+    test cannot SIGKILL itself, and that is exactly why this defect survived
+    every in-process test the project had.
+
+    The transition goes in as an *event*, not just as a projection row.
+    `_task_view` folds the log rather than trusting the projection, so a row
+    written straight into `tasks` is invisible to the API -- which is itself a
+    useful thing to have learned here.
+    """
+    from wukong.observability.events import EventType
+    from wukong.storage.store import Store
+
+    store = Store(settings.db_path)
+    try:
+        session_id = store.create_session(
+            name="crash", working_dir="/tmp", model_alias="mock"
+        )
+        task_id = store.create_task(session_id=session_id, goal="崩溃遗留的任务")
+        store.append(task_id, EventType.STATE_TRANSITION, {"to": "running"})
+        store.save_projection(
+            task_id,
+            status="running",
+            state={},
+            steps_used=3,
+            tokens_in=10,
+            tokens_out=5,
+            cost_usd=0.01,
+        )
+    finally:
+        store.close()
+    return task_id
+
+
+class TestOrphanedTasks:
+    """A `running` row that nothing is running.
+
+    Found by SIGKILLing the server mid-task for real. The record survived
+    intact and `resume` finished the job -- the durable-execution machinery
+    works -- but nothing on screen said a resume was available, so a user
+    would have waited forever on a task that was never going to move.
+
+    No in-process test could have caught it: inside one process the `running`
+    set is alive by definition, so "running but nothing is running it" is not
+    a state the test suite can construct.
+    """
+
+    def test_a_running_task_with_no_runner_is_marked(self, api, settings) -> None:
+        task_id = _seed_orphan(settings)
+
+        with api([]) as client:
+            body = client.get(f"/api/v1/tasks/{task_id}").json()
+
+        assert body["status"] == "running"
+        assert body["orphaned"] is True
+
+    def test_a_task_this_process_is_running_is_not_marked(self, api) -> None:
+        client = api([{"content": "done"}])
+        with client:
+            task_id = client.post("/api/v1/tasks", json={"goal": "g", "wait": False}).json()[
+                "id"
+            ]
+            client.app.state.svc.running[task_id] = object()
+            try:
+                body = client.get(f"/api/v1/tasks/{task_id}").json()
+            finally:
+                client.app.state.svc.running.pop(task_id, None)
+
+        assert body["orphaned"] is False
+
+    def test_the_list_marks_them_too(self, api, settings) -> None:
+        """The list is what the console draws, so the mark has to be there."""
+        task_id = _seed_orphan(settings)
+
+        with api([]) as client:
+            rows = client.get("/api/v1/tasks").json()
+
+        assert {r["id"]: r["orphaned"] for r in rows}[task_id] is True
+
+    def test_a_finished_task_is_never_orphaned(self, api) -> None:
+        client = api([{"content": "done"}])
+        with client:
+            task_id = client.post("/api/v1/tasks", json={"goal": "g", "wait": True}).json()[
+                "id"
+            ]
+            body = client.get(f"/api/v1/tasks/{task_id}").json()
+
+        assert body["status"] == "completed"
+        assert body["orphaned"] is False
+
+
 class TestFilePreview:
     """The read-only preview pane. It must not be able to change anything --
     the agent may be mid-run holding a file it has already read, and an editor

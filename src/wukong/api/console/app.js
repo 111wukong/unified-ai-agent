@@ -374,6 +374,7 @@ const STATUS_TONE = {
   running: "chip-accent",
   planning: "chip-accent",
   pending: "chip-accent",
+  orphaned: "chip-warn",
 };
 
 // Short label, full value in the tooltip. `waiting_confirmation` is a wire
@@ -382,6 +383,11 @@ const STATUS_LABEL = {
   pending: "排队中",
   planning: "规划中",
   running: "运行中",
+  // Not a status the server stores -- it is computed per request from "the
+  // record says running, and this process has never heard of it". It gets its
+  // own word because "运行中" is what makes a user wait for something that is
+  // never going to move.
+  orphaned: "已中断",
   waiting: "等待批准",
   waiting_confirmation: "等待批准",
   cancelling: "正在取消",
@@ -478,13 +484,22 @@ function setTitle(node, value) {
 function paintTask(node, task) {
   setText(node.goal, task.goal);
   setTitle(node.goal, task.goal);
-  setClass(node.chip, `chip ${STATUS_TONE[task.status] || ""}`.trim());
-  setText(node.chip, STATUS_LABEL[task.status] || task.status);
-  setTitle(node.chip, task.status);
+  // `orphaned` is computed by the server, not stored: the record says running
+  // and this process has never heard of the task. Painting that as "运行中" is
+  // a lie the user acts on by waiting for something that will never move.
+  const shown = task.orphaned ? "orphaned" : task.status;
+  setClass(node.chip, `chip ${STATUS_TONE[shown] || ""}`.trim());
+  setText(node.chip, STATUS_LABEL[shown] || task.status);
+  setTitle(
+    node.chip,
+    task.orphaned
+      ? "崩溃遗留：记录说在跑，但没有进程在跑它。用 task resume 可以接着跑。"
+      : task.status,
+  );
   setText(node.stats, `${task.steps_used} 步 · ${task.tokens_in + task.tokens_out} token`);
   // The status *key*, not its label: the colour is chosen from this and the
   // text is looked up separately, so a translated label cannot lose the colour.
-  node.item.dataset.state = task.status;
+  node.item.dataset.state = shown;
   node.item.classList.toggle("active", task.id === state.taskId);
 }
 
@@ -555,10 +570,14 @@ function renderTopbar(task) {
   setText($("topbar-title"), task ? task.id : "控制台");
   setTitle($("topbar-title"), task ? task.goal : "");
 
+  // Same substitution as the task list: an orphaned task is `running` in the
+  // record with nothing running it, and the topbar is the last place that
+  // should repeat the record's version of events.
+  const shown = task ? (task.orphaned ? "orphaned" : task.status) : "idle";
   const chip = $("topbar-status");
-  setClass(chip, `chip ${STATUS_TONE[task?.status] || ""}`.trim());
-  setText(chip, task ? STATUS_LABEL[task.status] || task.status : STATUS_LABEL.idle);
-  setTitle(chip, task?.status || "");
+  setClass(chip, `chip ${STATUS_TONE[shown] || ""}`.trim());
+  setText(chip, STATUS_LABEL[shown] || shown);
+  setTitle(chip, task?.orphaned ? "崩溃遗留，可以恢复" : task?.status || "");
 
   renderBudget(task).catch((error) => console.warn("budget unavailable", error));
 }
