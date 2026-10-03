@@ -14,7 +14,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from wukong import __version__
 from wukong.agent.factory import build_agent, default_skill_dirs
@@ -472,6 +472,72 @@ def tools(
             agent.close()
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def stats(
+    home: Optional[Path] = typer.Option(None, help="配置目录（默认 ~/.wukong）。"),
+    days: int = typer.Option(0, help="只统计最近 N 天的任务。0 表示全部。"),
+) -> None:
+    """这些任务花了多少，以及哪些在失败。
+
+    读的是投影表，所以是一条查询而不是把每个事件折一遍 —— 这是概览视图，
+    正是投影存在的理由。`task show` 才是必须精确折叠的那个。
+    """
+    settings = _settings(home, None)
+    since = None
+    if days > 0:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    store = _read_store(settings)
+    try:
+        summary = store.task_stats(since=since)
+    finally:
+        store.close()
+
+    if not summary["tasks"]:
+        console.print("[dim]还没有任务。[/dim]")
+        return
+
+    totals = Table(title="用量", show_header=True, header_style="bold")
+    totals.add_column("指标")
+    totals.add_column("值", justify="right")
+    totals.add_row("任务数", str(summary["tasks"]))
+    totals.add_row("总步数", str(summary["steps"]))
+    totals.add_row("输入 token", f"{summary['tokens_in']:,}")
+    totals.add_row("输出 token", f"{summary['tokens_out']:,}")
+    totals.add_row("合计 token", f"{summary['tokens_in'] + summary['tokens_out']:,}")
+    totals.add_row("成本", f"${summary['cost_usd']:.4f}")
+    console.print(totals)
+
+    by_status = Table(title="按状态", show_header=True, header_style="bold")
+    by_status.add_column("状态")
+    by_status.add_column("数量", justify="right")
+    for name, count in sorted(summary["by_status"].items(), key=lambda kv: -kv[1]):
+        by_status.add_row(name, str(count))
+    console.print(by_status)
+
+    if summary["most_expensive"]:
+        dearest = Table(title="最贵的任务", show_header=True, header_style="bold")
+        dearest.add_column("任务")
+        dearest.add_column("状态")
+        dearest.add_column("步数", justify="right")
+        dearest.add_column("成本", justify="right")
+        dearest.add_column("目标")
+        for task in summary["most_expensive"]:
+            dearest.add_row(
+                task["id"],
+                task["status"],
+                str(task["steps_used"]),
+                f"${task['cost_usd'] or 0:.4f}",
+                escape((task["goal"] or "").splitlines()[0][:36]),
+            )
+        console.print(dearest)
 
 
 # ---------------------------------------------------------------------------

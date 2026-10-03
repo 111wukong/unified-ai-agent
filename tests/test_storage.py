@@ -131,6 +131,58 @@ class TestTaskListCarriesTheParentLink:
 
         assert [c["id"] for c in store.list_children(parent)] == kids
 
+
+class TestTaskStats:
+    """The summary view.
+
+    Every number is already in `tasks`; the point is to stop making the user
+    run `task list` and add up columns by eye.
+    """
+
+    @staticmethod
+    def _finish(store: Store, task_id: str, *, steps: int, cost: float, tin: int = 100) -> None:
+        store.save_projection(
+            task_id,
+            status="completed",
+            state={},
+            steps_used=steps,
+            tokens_in=tin,
+            tokens_out=10,
+            cost_usd=cost,
+        )
+
+    def test_totals_add_up_across_tasks(self, store: Store) -> None:
+        sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
+        for i in range(3):
+            task = store.create_task(session_id=sid, goal=f"任务 {i}")
+            self._finish(store, task, steps=i + 1, cost=0.01)
+
+        summary = store.task_stats()
+
+        assert summary["tasks"] == 3
+        assert summary["steps"] == 6  # 1 + 2 + 3
+        assert summary["tokens_in"] == 300
+        assert summary["cost_usd"] == pytest.approx(0.03)
+        assert summary["by_status"] == {"completed": 3}
+
+    def test_the_dearest_come_first(self, store: Store) -> None:
+        sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
+        cheap = store.create_task(session_id=sid, goal="便宜")
+        dear = store.create_task(session_id=sid, goal="贵")
+        self._finish(store, cheap, steps=1, cost=0.01)
+        self._finish(store, dear, steps=1, cost=0.99)
+
+        assert store.task_stats()["most_expensive"][0]["goal"] == "贵"
+
+    def test_an_empty_store_is_zero_rather_than_an_error(self, store: Store) -> None:
+        """A fresh install runs `stats` before it runs anything else."""
+        summary = store.task_stats()
+
+        assert summary["tasks"] == 0
+        assert summary["cost_usd"] == 0.0
+        assert summary["by_status"] == {}
+        assert summary["most_expensive"] == []
+
     def test_appending_updates_the_projection_cursor(self, store: Store) -> None:
         sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
         task = store.create_task(session_id=sid, goal="g")

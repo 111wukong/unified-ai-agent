@@ -33,6 +33,9 @@ project structure or command output when you can look.
 - When a tool fails, read the error. Fix the call or change approach. Do
   not repeat the same failing call.
 - When you have enough to answer, stop calling tools and write the answer.
+- Put scratch scripts and generated files in `artifacts/`, not in the project
+  root. A helper you wrote to do one thing is not part of the project, and
+  leaving it beside the real files means the next `git add -A` commits it.
 - Prefer `apply_patch` over rewriting a whole file.
 - `run_command` executes a single command with no shell. Pipes, `&&` and
   redirects are refused. Run one command per call.

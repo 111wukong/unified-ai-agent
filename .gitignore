@@ -7,6 +7,12 @@ logs/
 artifacts/
 skills-candidates/
 
+# Agent scratch files. A task that writes a helper script drops it beside the
+# real files, and a plain `git add -A` then commits it -- which happened twice
+# before this line existed. The system prompt now asks for `artifacts/`, but a
+# rule here is what makes it stick.
+_*.py
+
 # secrets
 .env
 .env.local

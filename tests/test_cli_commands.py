@@ -96,6 +96,12 @@ class TestEveryCommandRuns:
         result = invoke(cli, "workflow", "list")
         assert result.exit_code == 0, result.output
 
+    def test_stats_on_an_empty_database(self, cli) -> None:  # noqa: ANN001
+        """A fresh install runs this before it runs anything else."""
+        result = invoke(cli, "stats")
+        assert result.exit_code == 0, result.output
+        assert "还没有任务" in result.stdout
+
 
 class TestOfflineRun:
     """`run --model mock` is the one path that needs no key, no network and no

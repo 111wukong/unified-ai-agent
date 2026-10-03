@@ -347,6 +347,55 @@ class Store:
             turns.append({"goal": row["goal"], "answer": answer})
         return turns
 
+    def task_stats(self, *, since: str | None = None) -> dict[str, Any]:
+        """Aggregate the task projection.
+
+        Every number here is already in `tasks`. The point is not to compute
+        something new but to stop making the user run `task list` and add up
+        columns by eye -- the three questions that actually come up are "what
+        has this cost me", "what is failing", and "which task ate the budget".
+
+        Reads the projection rather than folding events, and that is the right
+        call here: this is a summary view, exactly what the projection exists
+        for. `task show` is the one that must fold.
+        """
+        where = ""
+        params: tuple[Any, ...] = ()
+        if since:
+            where = " WHERE created_at >= ?"
+            params = (since,)
+
+        rows = self.conn.execute(
+            "SELECT status, COUNT(*) AS n, SUM(steps_used) AS steps,"
+            " SUM(tokens_in) AS tokens_in, SUM(tokens_out) AS tokens_out,"
+            " SUM(cost_usd) AS cost_usd FROM tasks"
+            f"{where} GROUP BY status",
+            params,
+        ).fetchall()
+
+        by_status: dict[str, int] = {}
+        totals = {"tasks": 0, "steps": 0, "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+        for row in rows:
+            by_status[row["status"]] = row["n"]
+            totals["tasks"] += row["n"] or 0
+            totals["steps"] += row["steps"] or 0
+            totals["tokens_in"] += row["tokens_in"] or 0
+            totals["tokens_out"] += row["tokens_out"] or 0
+            totals["cost_usd"] += row["cost_usd"] or 0.0
+
+        dearest = self.conn.execute(
+            "SELECT id, goal, status, steps_used, tokens_in, tokens_out, cost_usd"
+            " FROM tasks"
+            f"{where} ORDER BY cost_usd DESC, rowid DESC LIMIT 5",
+            params,
+        ).fetchall()
+
+        return {
+            **totals,
+            "by_status": by_status,
+            "most_expensive": [dict(r) for r in dearest],
+        }
+
     def save_projection(
         self,
         task_id: str,
