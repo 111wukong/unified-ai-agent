@@ -18,7 +18,7 @@ pytest.importorskip("typer", reason="typer is a core dependency")
 
 from typer.testing import CliRunner  # noqa: E402
 
-from wukong.cli import app  # noqa: E402
+from wukong.cli import _skill_verdict, app  # noqa: E402
 
 
 @pytest.fixture
@@ -123,3 +123,42 @@ class TestOfflineRun:
         listed = invoke(cli, "task", "list")
         assert "列出当前" in listed.stdout
         assert "completed" in listed.stdout
+
+
+class TestSkillVerdict:
+    """The judgement layer over the run counts.
+
+    Worth testing on its own because it is the part that *refuses* to
+    conclude: a verdict drawn from two runs is how a useful skill gets retired
+    for bad luck, and a verdict drawn from zero runs is how an unused one stays
+    `active` forever looking fine.
+    """
+
+    def test_an_unrun_active_skill_is_called_out(self) -> None:
+        assert "从没跑过" in _skill_verdict(status="active", runs=0, ok=0)
+
+    def test_a_small_sample_gets_no_verdict(self) -> None:
+        assert "样本太少" in _skill_verdict(status="active", runs=2, ok=0)
+
+    def test_a_low_success_rate_is_flagged(self) -> None:
+        assert "该看它的说明了" in _skill_verdict(status="active", runs=10, ok=3)
+
+    def test_a_middling_rate_is_called_middling(self) -> None:
+        assert "时好时坏" in _skill_verdict(status="active", runs=10, ok=6)
+
+    def test_a_high_success_rate_is_left_alone(self) -> None:
+        assert "表现稳定" in _skill_verdict(status="active", runs=10, ok=9)
+
+    def test_a_skill_still_on_the_ladder_is_not_judged_by_runs(self) -> None:
+        """It has not been approved yet, so its run count is not the question.
+        Saying "never run" about a candidate would be true and useless."""
+        verdict = _skill_verdict(status="candidate", runs=0, ok=0)
+
+        assert "还在阶梯上" in verdict
+        assert "从没跑过" not in verdict
+
+
+class TestSkillHealthCommand:
+    def test_it_runs_on_an_empty_database(self, cli) -> None:  # noqa: ANN001
+        result = invoke(cli, "skill", "health")
+        assert result.exit_code == 0, result.output

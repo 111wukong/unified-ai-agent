@@ -1089,6 +1089,42 @@ class Store:
             out.setdefault(row["skill_name"], {})[row["outcome"]] = row["n"]
         return out
 
+    def skill_stats(self) -> dict[str, dict[str, Any]]:
+        """name -> {runs, completed, failed, cancelled, last_run_at}.
+
+        The read half of the feedback loop. `skill_run_counts` answers "how
+        many" for the listing; this adds *when*, because "never run" and "ran
+        twice two months ago" are the same number and mean different things --
+        the first is a skill that should probably not be `active`, the second
+        is one that is simply narrow.
+        """
+        rows = self.conn.execute(
+            "SELECT skill_name, outcome, COUNT(*) AS n, MAX(created_at) AS last_at"
+            " FROM skill_runs GROUP BY skill_name, outcome"
+        ).fetchall()
+        out: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entry = out.setdefault(
+                row["skill_name"],
+                {
+                    "runs": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "cancelled": 0,
+                    "last_run_at": None,
+                },
+            )
+            entry["runs"] += row["n"]
+            # Guarded, so an outcome this method has not heard of counts
+            # towards the total without overwriting a field that means
+            # something else.
+            if row["outcome"] in {"completed", "failed", "cancelled"}:
+                entry[row["outcome"]] = row["n"]
+            last = row["last_at"]
+            if last and (entry["last_run_at"] is None or last > entry["last_run_at"]):
+                entry["last_run_at"] = last
+        return out
+
 
 def _reciprocal_rank_fusion(ranked_lists: list[list[str]], *, k: int = 60) -> list[str]:
     """Merge rankings by position, not by score.

@@ -1495,6 +1495,80 @@ def skill_runs(
     console.print(table)
 
 
+#: Below this many runs, a success rate is noise rather than evidence.
+_MIN_RUNS_FOR_A_VERDICT = 3
+
+
+def _skill_verdict(*, status: str, runs: int, ok: int) -> str:
+    """What the numbers say to do, in one line.
+
+    Deliberately refuses to conclude from a small sample. Two runs is not a
+    pattern, and a verdict drawn from two runs is how a useful skill gets
+    retired for bad luck.
+    """
+    if status in {"candidate", "validated", "approved"}:
+        return "[yellow]还在阶梯上，没批准[/yellow]"
+    if runs == 0:
+        return "[yellow]从没跑过 —— 它凭什么留在 active[/yellow]"
+    if runs < _MIN_RUNS_FOR_A_VERDICT:
+        return "[dim]样本太少，先别下结论[/dim]"
+    rate = ok / runs
+    if rate < 0.5:
+        return f"[red]{runs} 次只成了 {ok} 次，该看它的说明了[/red]"
+    if rate < 0.8:
+        return "[yellow]时好时坏[/yellow]"
+    return "[green]表现稳定[/green]"
+
+
+@skill_app.command("health")
+def skill_health(
+    home: Optional[Path] = typer.Option(None, "--home"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace"),
+) -> None:
+    """每个技能跑得怎么样，以及据此该做什么。
+
+    阶梯（candidate -> validated -> approved -> active）本身只记录「谁批准了它」，
+    不记录「它到底有没有用」。这张表把两边接上：没有它，`deprecate` 只能凭感觉做，
+    而一个从没跑过的 active 技能会一直挂在那里，看起来一切正常。
+    """
+    settings = _settings(home, workspace)
+    registry, store = _skill_registry(settings)
+    try:
+        result = registry.discover()
+        stats = store.skill_stats()
+    finally:
+        store.close()
+
+    if not result.loaded:
+        console.print("[dim]还没有技能。[/dim]")
+        return
+
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    table.add_column("技能")
+    table.add_column("状态")
+    table.add_column("运行", justify="right")
+    table.add_column("成功", justify="right")
+    table.add_column("成功率", justify="right")
+    table.add_column("最近一次", style="dim")
+    table.add_column("判断")
+
+    for skill in result.loaded:
+        entry = stats.get(skill.name) or {}
+        runs = entry.get("runs", 0)
+        ok = entry.get("completed", 0)
+        style = _SKILL_STATUS_STYLE.get(skill.status, "")
+        table.add_row(
+            skill.name,
+            f"[{style}]{skill.status}[/{style}]" if style else skill.status,
+            str(runs) if runs else "-",
+            str(ok) if runs else "-",
+            f"{ok / runs:.0%}" if runs else "-",
+            (entry.get("last_run_at") or "")[:10] or "-",
+            _skill_verdict(status=skill.status, runs=runs, ok=ok),
+        )
+    console.print(table)
+
+
 @skill_app.command("validate")
 def skill_validate(
     path: Path = typer.Argument(..., help="A skill directory or a SKILL.md path."),

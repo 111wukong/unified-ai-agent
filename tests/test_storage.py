@@ -183,6 +183,49 @@ class TestTaskStats:
         assert summary["by_status"] == {}
         assert summary["most_expensive"] == []
 
+
+class TestSkillStats:
+    """The read half of the skill feedback loop.
+
+    `skill_run_counts` answers "how many" for the listing. This adds *when*,
+    because "never run" and "ran twice two months ago" are the same number and
+    mean different things.
+    """
+
+    def test_outcomes_are_tallied_per_skill(self, store: Store) -> None:
+        for outcome in ["completed", "completed", "failed", "cancelled"]:
+            store.record_skill_run(skill_name="demo", task_id="t1", outcome=outcome)
+
+        stats = store.skill_stats()["demo"]
+
+        assert stats["runs"] == 4
+        assert stats["completed"] == 2
+        assert stats["failed"] == 1
+        assert stats["cancelled"] == 1
+
+    def test_skills_are_kept_apart(self, store: Store) -> None:
+        store.record_skill_run(skill_name="a", task_id="t1", outcome="completed")
+        store.record_skill_run(skill_name="b", task_id="t2", outcome="failed")
+
+        stats = store.skill_stats()
+
+        assert stats["a"]["completed"] == 1 and stats["a"]["failed"] == 0
+        assert stats["b"]["failed"] == 1 and stats["b"]["completed"] == 0
+
+    def test_last_run_at_is_the_latest_not_the_first(self, store: Store) -> None:
+        """Getting this backwards would make an active skill look abandoned."""
+        store.record_skill_run(skill_name="demo", task_id="t1", outcome="completed")
+        store.record_skill_run(skill_name="demo", task_id="t2", outcome="completed")
+
+        stamps = [r["created_at"] for r in store.list_skill_runs(skill_name="demo")]
+
+        assert store.skill_stats()["demo"]["last_run_at"] == max(stamps)
+
+    def test_an_unrun_skill_is_absent_rather_than_zeroed(self, store: Store) -> None:
+        """Absent and `runs: 0` mean the same thing to the caller, and only
+        one of them can be produced by a GROUP BY."""
+        assert store.skill_stats() == {}
+
     def test_appending_updates_the_projection_cursor(self, store: Store) -> None:
         sid = store.create_session(name="s", working_dir="/tmp", model_alias="mock")
         task = store.create_task(session_id=sid, goal="g")
