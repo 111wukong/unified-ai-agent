@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Review a code change and report findings by severity. Use when the user asks to review a diff, a pull request, or a specific file's changes, or asks whether a change is safe to merge.
+description: 审查代码改动，按严重程度报告发现的问题。当用户要求审查一个 diff、一个 Pull Request、或某个文件的改动，或者问某处改动是否适合合并时使用。
 license: MIT
 allowed-tools: read_file list_directory search_files git_status git_diff run_tests
 metadata:
@@ -8,47 +8,41 @@ metadata:
   version: "1.0"
 ---
 
-# Code Review
+# 代码审查
 
-## Goal
+## 目标
 
-Produce findings a developer can act on. A review that only says "looks
-good" is a failed review; so is a review that lists style preferences as
-if they were defects.
+给出开发者能照着行动的结论。只说「看起来没问题」的审查是失败的审查；
+把风格偏好当成缺陷列出来的审查，同样是失败的。
 
-## Process
+## 流程
 
-1. Establish what actually changed. Use `git_status` and `git_diff` — do
-   not review from the description alone, which is frequently stale.
-2. Read the full context of each changed hunk, not just the diff. A
-   changed line is only correct or incorrect relative to the function
-   around it.
-3. Check, in this order:
-   - **Correctness** — off-by-one, inverted conditions, unhandled `None`,
-     error paths that swallow exceptions, resource leaks.
-   - **Security** — unvalidated input reaching a sink, secrets in logs or
-     source, path traversal, injection, missing authorization checks.
-   - **Concurrency** — shared mutable state, missing locks, `await` inside
-     a critical section, timeouts that do not exist.
-   - **Tests** — is the new behaviour covered? Does an existing test now
-     pass for the wrong reason?
-   - **Maintainability** — only when it obscures a real defect. Do not
-     report formatting.
-4. Report each finding as: severity, file and line, what is wrong, why it
-   matters, and the smallest fix.
+1. **先确认实际改了什么。** 用 `git_status` 和 `git_diff` ——
+   不要只凭改动描述来审，那通常是过时的。
+2. **读每个改动块的完整上下文**，而不只是 diff。
+   一行代码是对是错，要相对它所在的函数才能判断。
+3. **按这个顺序检查**：
+   - **正确性** —— 差一错误、条件写反、未处理的 `None`、
+     吞掉异常的 error path、资源泄漏。
+   - **安全** —— 未校验的输入流向下游、日志或源码里的密钥、
+     路径穿越、注入、缺少授权检查。
+   - **并发** —— 共享可变状态、缺失的锁、
+     临界区里的 `await`、不存在的超时。
+   - **测试** —— 新行为被覆盖了吗？有没有测试现在「因为错误的原因」而通过？
+   - **可维护性** —— 只在它掩盖了真实缺陷时才提。不要报格式问题。
+4. **每条发现都写成**：严重程度、文件与行号、哪里错了、
+   为什么重要、以及最小的修法。
 
-## Severity
+## 严重程度
 
-- `blocker` — wrong result, data loss, or a security hole.
-- `major` — breaks in a realistic case, or is unmaintainable enough to
-  cause future defects.
-- `minor` — real but low impact.
-- `nit` — preference. Say so explicitly.
+- `blocker` —— 结果错误、数据丢失、或安全漏洞。
+- `major` —— 在现实场景下会坏，或者可维护性差到会引发未来的缺陷。
+- `minor` —— 真实存在，但影响很小。
+- `nit` —— 偏好问题。要**明说**这是偏好。
 
-## Rules
+## 规则
 
-- Do not modify files unless explicitly asked to fix.
-- Do not report a finding you have not read the surrounding code for.
-- If you cannot determine whether something is a bug, say that instead of
-  guessing.
-- Report what you did *not* review. Silence implies coverage.
+- 除非明确要求修复，否则**不要改文件**。
+- **没有读过周围代码的发现，不要报**。
+- 如果你判断不了某处是不是 bug，就**说判断不了**，不要猜。
+- **说明你没审哪些部分**。沉默会被当成「都审过了」。

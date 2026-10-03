@@ -214,7 +214,7 @@ class TestRestTasks:
                 json={"goal": "x", "model": "scripted", "approve": ["system_admin"]},
             )
         assert response.status_code == 400
-        assert "cannot be pre-approved" in response.json()["detail"]
+        assert "不能通过 HTTP 预授权" in response.json()["detail"]
 
     def test_unknown_effect_is_400(self, api) -> None:
         client = api([])
@@ -728,7 +728,9 @@ class TestApprovingTheRightTask:
 
             response = client.post(f"/api/v1/tasks/{task_id}/approve")
         assert response.status_code == 409
-        assert "no pending approval" in response.json()["detail"]
+        # Asserted on the *reason*, not on the sentence: the wording is
+        # user-facing text and moves with the interface language.
+        assert "没有待处理的审批" in response.json()["detail"]
 
     def test_the_run_id_is_not_the_task_id(self, api) -> None:  # noqa: ANN001
         """`threadId` and `runId` are the client's own identifiers. A client

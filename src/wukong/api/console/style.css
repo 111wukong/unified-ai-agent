@@ -84,6 +84,14 @@
 html, body {
   margin: 0;
   height: 100%;
+  /* The page itself never scrolls. Every scrollable thing is an element
+     inside it, and a page that can *also* scroll means the wheel sometimes
+     moves the whole layout instead of the pane under the cursor -- which is
+     exactly what "the scrolling is wrong" feels like. `overscroll-behavior`
+     stops the scroll from chaining out to the window once a pane hits its
+     end, which is the other half of the same complaint. */
+  overflow: hidden;
+  overscroll-behavior: none;
   background: var(--bg);
   color: var(--text);
   /* 1.7 rather than 1.55: hanzi fill their em box, so the same leading that
@@ -95,7 +103,10 @@ html, body {
 #app {
   display: grid;
   grid-template-columns: 288px minmax(0, 1fr);
+  /* `dvh` rather than `vh`: a desktop window and a mobile browser both resize
+     the *dynamic* viewport, and `100vh` is the one that does not follow it. */
   height: 100vh;
+  height: 100dvh;
 }
 
 /* The preview opens as a third column rather than as an overlay: the
@@ -112,6 +123,11 @@ html, body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The sidebar does not scroll as a whole; each list scrolls inside itself.
+     One scrolling column would push the brand off the top and the footer off
+     the bottom the moment the file tree grew -- and the two things a user
+     reaches for most would be the two things out of reach. */
+  overflow: hidden;
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
 }
@@ -121,6 +137,22 @@ html, body {
   align-items: center;
   gap: 11px;
   padding: 18px 18px 16px;
+}
+
+/* The middle of the sidebar scrolls; the brand and the footer do not.
+ *
+ * Six panels do not fit in a short window at their natural heights -- the
+ * measured total at 680px was 706 -- and `overflow: hidden` on the sidebar
+ * silently cut off the bottom two, which were the file tree and the task
+ * list. A scrolling middle means that estimate never has to be right:
+ * whatever does not fit is still reachable. */
+.sidebar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
 }
 
 .brand-mark {
@@ -155,7 +187,7 @@ html, body {
 }
 
 .panel + .panel { border-top: 1px solid var(--border); }
-.panel-grow { flex: 1; min-height: 0; }
+.panel-grow { flex: none; min-height: 0; }
 
 .panel-title {
   display: flex;
@@ -365,8 +397,11 @@ input:focus, textarea:focus {
 
 /* -------------------------------------------------------------------- tree */
 
+/* Inside a scrolling column, `flex: 1` has nothing to distribute against --
+   the column is as tall as its content. So each list caps itself instead, and
+   the sidebar's own scroll is the backstop when a cap turns out to be wrong. */
 .panel-tree {
-  flex: 0 1 auto;
+  flex: none;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -374,7 +409,8 @@ input:focus, textarea:focus {
 
 .tree {
   overflow-y: auto;
-  max-height: 34vh;
+  min-height: 0;
+  max-height: 32vh;
   font-size: 12px;
 }
 
@@ -458,6 +494,7 @@ input:focus, textarea:focus {
   gap: 3px;
   overflow-y: auto;
   min-height: 0;
+  max-height: 42vh;
   margin: 0 -8px;
   padding: 0 8px;
 }

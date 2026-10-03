@@ -153,7 +153,7 @@ class Service:
     @property
     def a(self) -> Agent:
         if self.agent is None:
-            raise HTTPException(status_code=503, detail="service not ready")
+            raise HTTPException(status_code=503, detail="服务尚未就绪")
         return self.agent
 
     def track(self, task_id: str, coro: Any) -> asyncio.Task:
@@ -270,9 +270,9 @@ def create_app(
         root = Path(svc.settings.workspace).resolve()
         target = (root / path).resolve() if path else root
         if target != root and root not in target.parents:
-            raise HTTPException(status_code=400, detail="path escapes the workspace")
+            raise HTTPException(status_code=400, detail="路径超出了工作区范围")
         if not target.is_dir():
-            raise HTTPException(status_code=404, detail=f"not a directory: {path or '.'}")
+            raise HTTPException(status_code=404, detail=f"不是目录：{path or '.'}")
 
         entries: list[dict[str, Any]] = []
         try:
@@ -288,7 +288,7 @@ def create_app(
                     {"name": child.name, "type": "dir" if is_dir else "file", "size": size}
                 )
         except PermissionError:
-            raise HTTPException(status_code=403, detail="permission denied") from None
+            raise HTTPException(status_code=403, detail="没有权限读取") from None
 
         return {
             "path": str(target.relative_to(root)) if target != root else "",
@@ -308,9 +308,9 @@ def create_app(
         root = Path(svc.settings.workspace).resolve()
         target = (root / path).resolve()
         if target != root and root not in target.parents:
-            raise HTTPException(status_code=400, detail="path escapes the workspace")
+            raise HTTPException(status_code=400, detail="路径超出了工作区范围")
         if not target.is_file():
-            raise HTTPException(status_code=404, detail=f"not a file: {path}")
+            raise HTTPException(status_code=404, detail=f"不是文件：{path}")
 
         size = target.stat().st_size
         if size > _PREVIEW_MAX_BYTES:
@@ -369,9 +369,9 @@ def create_app(
         root = Path(svc.settings.workspace).resolve()
         target = (root / payload.path).resolve()
         if target != root and root not in target.parents:
-            raise HTTPException(status_code=400, detail="path escapes the workspace")
+            raise HTTPException(status_code=400, detail="路径超出了工作区范围")
         if not target.is_file():
-            raise HTTPException(status_code=404, detail=f"not a file: {payload.path}")
+            raise HTTPException(status_code=404, detail=f"不是文件：{payload.path}")
 
         encoded = payload.text.encode("utf-8")
         if len(encoded) > _PREVIEW_MAX_BYTES:
@@ -477,7 +477,7 @@ def create_app(
         """
         outcome = svc.a.runtime.cancel(task_id)
         if outcome == "not_found":
-            raise HTTPException(status_code=404, detail=f"no such task: {task_id}")
+            raise HTTPException(status_code=404, detail=f"没有这个任务：{task_id}")
         row = svc.a.runtime.store.get_task(task_id) or {}
         return {
             "id": task_id,
@@ -594,7 +594,7 @@ def create_app(
         if not svc.settings.a2a.enabled:
             raise HTTPException(
                 status_code=404,
-                detail="A2A is not enabled; set a2a.enabled to publish this agent",
+                detail="A2A 未启用；先设置 a2a.enabled 才能发布这个 agent",
             )
         card = _a2a_server().card(url=f"{_base_url(request)}/a2a")
         return card.model_dump(mode="json")
@@ -611,7 +611,7 @@ def create_app(
         if not svc.settings.a2a.enabled:
             raise HTTPException(
                 status_code=404,
-                detail="A2A is not enabled; set a2a.enabled to accept peers",
+                detail="A2A 未启用；先设置 a2a.enabled 才能接受对端调用",
             )
         try:
             payload = await request.json()
@@ -658,7 +658,7 @@ def create_app(
     async def attach_stream(task_id: str, thread_id: str | None = None) -> StreamingResponse:
         """Attach to an already-created task and stream AG-UI events."""
         if svc.a.store.get_task(task_id) is None:
-            raise HTTPException(status_code=404, detail=f"unknown task {task_id}")
+            raise HTTPException(status_code=404, detail=f"未知任务 {task_id}")
         return StreamingResponse(
             _attach_stream(svc, task_id, thread_id or task_id),
             media_type="text/event-stream",
@@ -772,12 +772,12 @@ def _grantable(names: list[str]) -> list[EffectClass]:
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"unknown effect {name!r}; known: {[e.value for e in EffectClass]}",
+                detail=f"未知的效果等级 {name!r}；可选：{[e.value for e in EffectClass]}",
             ) from None
         if effect not in GRANTABLE:
             raise HTTPException(
                 status_code=400,
-                detail=f"{effect.value} cannot be pre-approved over HTTP",
+                detail=f"{effect.value} 不能通过 HTTP 预授权",
             )
         out.append(effect)
     return out
@@ -786,7 +786,7 @@ def _grantable(names: list[str]) -> list[EffectClass]:
 def _task_view(svc: Service, task_id: str) -> dict[str, Any]:
     task = svc.a.store.get_task(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail=f"unknown task {task_id}")
+        raise HTTPException(status_code=404, detail=f"未知任务 {task_id}")
     state = replay(svc.a.store.events(task_id), task_id=task_id, session_id=task["session_id"])
     return {
         "id": task_id,
@@ -828,9 +828,9 @@ def _budgets(svc: Service, task_id: str) -> dict[str, Any]:
 def _require_pending(svc: Service, task_id: str) -> None:
     task = svc.a.store.get_task(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail=f"unknown task {task_id}")
+        raise HTTPException(status_code=404, detail=f"未知任务 {task_id}")
     if not task["pending_confirmation"]:
-        raise HTTPException(status_code=409, detail=f"task {task_id} has no pending approval")
+        raise HTTPException(status_code=409, detail=f"任务 {task_id} 没有待处理的审批")
 
 
 def _encode(encoder: agui.AgUiEncoder, item: Any) -> list[dict[str, Any]]:

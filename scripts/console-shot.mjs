@@ -264,7 +264,25 @@ async function main() {
             composerVisible: composer ? composer.getBoundingClientRect().height > 0 : false,
             taskRows: document.querySelectorAll("#tasks *").length,
             innerWidth: window.innerWidth,
-            scrollHeight: document.documentElement.scrollHeight
+            scrollHeight: document.documentElement.scrollHeight,
+            // Scroll health. pageOverflows is the one that matters: the page
+            // is supposed to be a fixed frame with scrollable panes inside it,
+            // so a document taller than the viewport means the wheel will
+            // sometimes move the whole layout instead of the pane under the
+            // cursor. The per-pane flags report *content* exceeding its box,
+            // which is normal for a list and is what makes it scroll.
+            pageOverflows:
+              document.documentElement.scrollHeight >
+              document.documentElement.clientHeight + 1,
+            bodyOverflows: document.body.scrollHeight > window.innerHeight + 1,
+            sidebarOverflows: (function () {
+              var s = document.getElementById("sidebar");
+              return s ? s.scrollHeight > s.clientHeight + 1 : null;
+            })(),
+            transcriptOverflows: (function () {
+              var t = document.getElementById("transcript");
+              return t ? t.scrollHeight > t.clientHeight + 1 : null;
+            })()
           });
         } catch (e) {
           return "probe failed: " + e.message;

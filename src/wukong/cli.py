@@ -276,7 +276,7 @@ def _store_health(settings: Settings, *, sample: int = 20) -> list[tuple[str, st
     from wukong.storage.store import Store
 
     if not settings.db_path.exists():
-        return [("store", "[dim]not created yet[/dim]")]
+        return [("store", "[dim]尚未创建[/dim]")]
 
     store = Store.readonly(settings.db_path)
     try:
@@ -331,9 +331,9 @@ def doctor(
 ) -> None:
     """Check the environment and report anything that will bite."""
     settings = _settings(home, workspace)
-    table = Table(title="environment", show_header=True, header_style="bold")
-    table.add_column("check")
-    table.add_column("result")
+    table = Table(title="环境", show_header=True, header_style="bold")
+    table.add_column("检查项")
+    table.add_column("结果")
 
     table.add_row("python", sys.version.split()[0])
     table.add_row("config", str(settings.home / "config.toml"))
@@ -343,25 +343,25 @@ def doctor(
     for alias in sorted(settings.models):
         spec = settings.models[alias]
         if spec.provider == "mock":
-            table.add_row(f"model:{alias}", "[green]offline, always available[/green]")
+            table.add_row(f"model:{alias}", "[green]离线，始终可用[/green]")
         elif spec.api_key():
-            table.add_row(f"model:{alias}", f"[green]key found ({spec.key_env()})[/green]")
+            table.add_row(f"model:{alias}", f"[green]已配置密钥（{spec.key_env()}）[/green]")
         else:
-            table.add_row(f"model:{alias}", f"[yellow]no key ({spec.key_env()})[/yellow]")
+            table.add_row(f"model:{alias}", f"[yellow]未配置密钥（{spec.key_env()}）[/yellow]")
 
     engine = PermissionEngine(
         settings.permissions, workspace=settings.workspace, home=settings.home
     )
     table.add_row(
         "shell allowlist",
-        f"{len(settings.permissions.shell.allow)} entries, "
-        f"metacharacters {'allowed' if settings.permissions.shell.allow_metacharacters else 'blocked'}",
+        f"白名单 {len(settings.permissions.shell.allow)} 条，"
+        f"元字符 {'允许' if settings.permissions.shell.allow_metacharacters else '禁止'}",
     )
     table.add_row(
         "network",
         "[red]allow_all[/red]"
         if settings.permissions.network.allow_all
-        else f"{len(settings.permissions.network.allow_domains)} domain(s)",
+        else f"{len(settings.permissions.network.allow_domains)} 个域名",
     )
     from wukong.sandbox import build_sandbox
 

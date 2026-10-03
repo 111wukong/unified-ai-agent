@@ -1,6 +1,6 @@
 ---
 name: project-summary
-description: Summarise an unfamiliar codebase. Use when the user asks what a project does, asks for an overview of a repository, or asks where something is implemented and the answer requires reading the tree.
+description: 总结一个不熟悉的代码库。当用户问这个项目是做什么的、要求概览一个仓库、或者问某个功能实现在哪里而回答需要读目录树时使用。
 license: MIT
 allowed-tools: read_file list_directory search_files file_info
 metadata:
@@ -8,40 +8,36 @@ metadata:
   version: "1.0"
 ---
 
-# Project Summary
+# 项目概览
 
-## Goal
+## 目标
 
-Explain a codebase to someone who has not seen it, in enough depth that
-they can find things. Grounded in files you actually read.
+向没见过这个代码库的人讲清楚它，深度要够他**自己找得到东西**。
+每一句都要落在你真读过的文件上。
 
-## Process
+## 流程
 
-1. List the top two levels. Do not go deeper until you know what the
-   entry points are.
-2. Read the manifest (`pyproject.toml`, `package.json`, `go.mod`, …). It
-   states dependencies, entry points and scripts, and it is never stale
-   in the way a README is.
-3. Read the README if one exists, but treat it as a claim to verify, not
-   as fact.
-4. Identify the entry points: where execution starts, where the HTTP
-   routes or CLI commands are registered, where the data model lives.
-5. Trace one representative path end to end — one request, one command —
-   from entry point to side effect. This is what turns a file listing into
-   an explanation.
-6. Note what is *absent*: no tests, no migrations, no error handling.
-   Absence is usually the most useful thing you can report.
+1. **先列前两层目录**。在知道入口在哪之前，不要往下钻。
+2. **读清单文件**（`pyproject.toml`、`package.json`、`go.mod`……）。
+   它写明依赖、入口和脚本，而且**不会像 README 那样过时**。
+3. **读 README**（如果有），但把它当成**待验证的说法**，不是事实。
+4. **找入口**：执行从哪里开始、HTTP 路由或 CLI 命令在哪注册、
+   数据模型在哪。
+5. **完整走通一条有代表性的路径** —— 一个请求、或一条命令 ——
+   从入口到副作用。**这一步才是把「文件清单」变成「解释」的关键。**
+6. **指出缺什么**：没有测试、没有迁移、没有错误处理。
+   「缺失」通常是你最该报告的东西。
 
-## Output
+## 输出
 
-- One paragraph: what the project is for.
-- Layout: the directories that matter and what each owns.
-- Entry points: exact file paths.
-- The traced path, as a short ordered list.
-- Gaps and surprises.
+- 一段话：这个项目是干什么的。
+- 结构：重要的目录，各自负责什么。
+- 入口：确切的文件路径。
+- 走通的那条路径，按顺序列出来。
+- 缺口与意外之处。
 
-## Rules
+## 规则
 
-- Cite real paths. Never invent a directory or file name.
-- If a directory is large, say how many files rather than listing them all.
-- Do not describe what you did not read. Mark inferences as inferences.
+- **引用真实路径**。绝不编造目录名或文件名。
+- 目录很大时，**说有多少个文件**，不要全列出来。
+- **没读过的部分不要描述**。推断要标成推断。
