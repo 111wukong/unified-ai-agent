@@ -35,21 +35,27 @@ from wukong.types import EffectClass
 
 app = typer.Typer(
     name="wukong",
-    help="wukong — a local-first agent runtime with durable execution.",
+    help="wukong — 本地优先的 agent 运行时，支持持久化执行。",
     no_args_is_help=True,
+    # Off, deliberately, and it is not laziness. Click's completion machinery
+    # writes into the user's shell config on first run. In a sandboxed or
+    # read-only home that does not fail -- it *hangs*, and the command had to
+    # be killed with SIGTERM. An installer that edits `~/.zshrc` without
+    # asking is also the wrong default shape: `opencode completion` prints a
+    # script and lets the user decide, which is the one to copy.
     add_completion=False,
 )
-config_app = typer.Typer(help="Read and write configuration.", no_args_is_help=True)
-task_app = typer.Typer(help="Inspect and resume tasks.", no_args_is_help=True)
-memory_app = typer.Typer(help="Inspect and search memories.", no_args_is_help=True)
+config_app = typer.Typer(help="读写配置。", no_args_is_help=True)
+task_app = typer.Typer(help="查看与恢复任务。", no_args_is_help=True)
+memory_app = typer.Typer(help="查看与检索记忆。", no_args_is_help=True)
 workflow_app = typer.Typer(
-    help="Compose agent runs declaratively. Validated before anything runs.",
+    help="用声明式文件编排 agent 运行，跑之前先校验。",
     no_args_is_help=True,
 )
 app.add_typer(workflow_app, name="workflow")
 
-skill_app = typer.Typer(help="Inspect and validate skills.", no_args_is_help=True)
-a2a_app = typer.Typer(help="Agent-to-agent: publish this agent, call another.", no_args_is_help=True)
+skill_app = typer.Typer(help="查看与校验技能。", no_args_is_help=True)
+a2a_app = typer.Typer(help="Agent 之间通信：发布自己、调用别人。", no_args_is_help=True)
 app.add_typer(config_app, name="config")
 app.add_typer(task_app, name="task")
 app.add_typer(memory_app, name="memory")
@@ -235,7 +241,7 @@ def _report_reflection(agent, result, *, quiet: bool) -> None:
 
 @app.command()
 def version() -> None:
-    """Print the version."""
+    """打印版本。"""
     console.print(f"wukong {__version__}")
 
 
@@ -244,7 +250,7 @@ def init(
     home: Optional[Path] = typer.Option(None, "--home", help="Config directory (default ~/.wukong)."),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing config."),
 ) -> None:
-    """Create the config file and data directories."""
+    """创建配置文件和数据目录。"""
     target_home = (home or default_home()).expanduser()
     path = write_default_config(target_home / "config.toml", force=force)
     settings = load_settings(home=target_home, create_if_missing=True)
@@ -329,7 +335,7 @@ def doctor(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Check the environment and report anything that will bite."""
+    """检查环境，报告会咬人的地方。"""
     settings = _settings(home, workspace)
     table = Table(title="环境", show_header=True, header_style="bold")
     table.add_column("检查项")
@@ -429,7 +435,7 @@ def tools(
         None, "--effect", help="Only tools in one effect class, e.g. execute_local."
     ),
 ) -> None:
-    """List the registered tools and their permission class."""
+    """列出已注册的工具及其权限等级。"""
     settings = _settings(home, workspace)
     wanted: Optional[EffectClass] = None
     if effect:
@@ -550,7 +556,7 @@ def config_show(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Print the effective configuration."""
+    """打印生效的配置。"""
     settings = _settings(home, workspace)
     console.print(config_to_toml(settings), markup=False)
 
@@ -561,7 +567,7 @@ def config_set(
     value: str = typer.Argument(...),
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """Set a configuration value (dotted path)."""
+    """设置一个配置项（点号路径）。"""
     settings = _settings(home, workspace=None, create=True)
     editor = ConfigEditor(settings)
     try:
@@ -603,7 +609,7 @@ def run(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Run a single task."""
+    """运行单个任务。"""
     settings = _settings(home, workspace)
     # The runtime owns reflection (so the HTTP layer gets it too); the flag
     # just turns it on for this run.
@@ -655,7 +661,7 @@ def chat(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Interactive session. Each line is a new task in the same session."""
+    """交互式会话。每一行是同一会话里的一个新任务。"""
     settings = _settings(home, workspace)
     effects = _parse_effects(approve)
     console.print(
@@ -721,7 +727,7 @@ def task_list(
     ),
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """List recent tasks."""
+    """列出最近的任务。"""
     settings = _settings(home, None)
     from wukong.agent.state import RESUMABLE_STATUSES
 
@@ -762,7 +768,7 @@ def task_show(
     task_id: str,
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """Show a task's plan, log and ledger."""
+    """查看某个任务的计划、日志与工具台账。"""
     settings = _settings(home, None)
     from wukong.agent.state import replay
 
@@ -832,7 +838,7 @@ def task_events(
     limit: int = typer.Option(60, "--limit", "-n"),
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """Print the event stream (the source of truth)."""
+    """打印事件流（唯一真相）。"""
     settings = _settings(home, None)
 
     store = _read_store(settings)
@@ -855,7 +861,7 @@ def task_rewind(
     ),
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """Undo a task's file changes, from its checkpoints.
+    """按检查点还原某个任务改过的文件。
 
     Previews by default. Restoring files is destructive in the one way that
     matters -- it can overwrite work done after the agent's -- so the
@@ -899,7 +905,7 @@ def task_search(
     ),
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """Find past tasks by goal or by their final answer."""
+    """按目标或最终答案搜索过去的任务。"""
     settings = _settings(home, None)
     store = _read_store(settings)
     try:
@@ -934,7 +940,7 @@ def task_resume(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Resume an interrupted task. Resolves any in-flight tool calls first."""
+    """恢复被中断的任务。先处理掉在途的工具调用。"""
     settings = _settings_for_task(task_id, home, workspace)
 
     async def _run() -> int:
@@ -984,7 +990,7 @@ def task_approve(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Approve a pending tool call and continue the task."""
+    """批准一个待定的工具调用，任务继续。"""
     settings = _settings_for_task(task_id, home, workspace)
 
     async def _run() -> int:
@@ -1006,7 +1012,7 @@ def task_deny(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Refuse a pending tool call. The agent is told and must not work around it."""
+    """拒绝一个待定的工具调用。会明确告诉模型，且它不得绕路。"""
     settings = _settings_for_task(task_id, home, workspace)
 
     async def _run() -> int:
@@ -1026,7 +1032,7 @@ def task_cancel(
     task_id: str,
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """Cancel a task. A paused one is cancelled now; a running one stops at its next step."""
+    """取消任务。已暂停的立即取消；运行中的在下一个步边界停下。"""
     from wukong.agent.runtime import cancel_task
 
     settings = _settings(home, None)
@@ -1060,7 +1066,7 @@ def memory_list(
     limit: int = typer.Option(50, "--limit", "-n"),
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """List stored memories."""
+    """列出已存的记忆。"""
     settings = _settings(home, None)
 
     store = _read_store(settings)
@@ -1121,7 +1127,7 @@ def memory_stats(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """What is stored, and whether vector search is actually available."""
+    """存了什么，以及向量检索到底可不可用。"""
     settings = _settings(home, workspace)
     from wukong.memory import build_memory_service
 
@@ -1173,7 +1179,7 @@ def memory_reindex(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Embed memories that have no vector for the current embedding model."""
+    """给还没有向量的记忆补上当前嵌入模型的向量。"""
     settings = _settings(home, workspace)
     from wukong.memory import build_memory_service
     from wukong.storage.store import Store
@@ -1198,7 +1204,7 @@ def memory_history(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Show what a memory replaced, and what replaced it.
+    """查看一条记忆替换了什么，以及后来又被什么替换。
 
     This is what invalidating instead of overwriting buys: the store can
     still answer "what did this used to be".
@@ -1230,7 +1236,7 @@ def memory_add(
     tags: str = typer.Option("", "--tags", help="Comma separated."),
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """Add a memory by hand."""
+    """手动添加一条记忆。"""
     settings = _settings(home, None)
     settings.ensure_dirs()
     from wukong.storage.store import Store
@@ -1253,7 +1259,7 @@ def memory_forget(
     memory_id: str,
     home: Optional[Path] = typer.Option(None, "--home"),
 ) -> None:
-    """Delete a memory."""
+    """删除一条记忆。"""
     settings = _settings(home, None)
     from wukong.storage.store import Store
 
@@ -1309,7 +1315,7 @@ def skill_list(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """List discovered skills, including the ones waiting for review."""
+    """列出已发现的技能，包括等待审核的那些。"""
     settings = _settings(home, workspace)
     registry, store = _skill_registry(settings)
     try:
@@ -1364,7 +1370,7 @@ def skill_promote(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Move a skill one rung along candidate -> validated -> approved -> active.
+    """把技能沿 candidate -> validated -> approved -> active 往上推一级。
 
     Skipping rungs is refused: each one is a separate judgement (does it
     parse / is it correct / does a human accept it / may it run). `deprecated`
@@ -1398,7 +1404,7 @@ def skill_review(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Show what still has to be true before a skill may run."""
+    """说明一个技能要能跑，还差什么。"""
     settings = _settings(home, workspace)
     registry, store = _skill_registry(settings)
     try:
@@ -1457,7 +1463,7 @@ def skill_runs(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Show which tasks loaded a skill and how they ended.
+    """查看哪些任务加载过某个技能，以及结果如何。
 
     This is the only evidence behind a `deprecate` decision: a skill that is
     loaded often and never finishes a task is a skill to retire.
@@ -1495,7 +1501,7 @@ def skill_validate(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Validate a skill against the Agent Skills spec and run the security review."""
+    """按 Agent Skills 规范校验技能，并跑一遍安全审查。"""
     target = path / "SKILL.md" if path.is_dir() else path
     if not target.is_file():
         err_console.print(f"no SKILL.md at {target}")
@@ -1531,7 +1537,7 @@ def skill_show(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Print a skill's full instructions."""
+    """打印一个技能的完整说明。"""
     settings = _settings(home, workspace)
     registry, store = _skill_registry(settings)
     try:
@@ -1561,7 +1567,7 @@ def a2a_card(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Print the Agent Card this agent would publish."""
+    """打印这个 agent 会发布的 Agent Card。"""
     settings = _settings(home, workspace)
     settings.a2a.enabled = True  # building the card is not the same as serving it
 
@@ -1587,7 +1593,7 @@ def a2a_check(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Fetch and vet a remote Agent Card without calling the agent.
+    """取回并审查对端的 Agent Card，但不调用它。
 
     Worth doing before a call: the card is untrusted input, and this prints
     what the security review thought of it.
@@ -1623,7 +1629,7 @@ def a2a_call(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Call a remote agent.
+    """调用一个远端 agent。
 
     The host must be on `a2a.allow_hosts`; an empty list means this agent
     calls nobody, which is the default.
@@ -1678,7 +1684,7 @@ def sandbox(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Report which process-isolation backend is actually active, and prove it.
+    """报告实际生效的进程隔离后端是哪个，并真的验证一次。
 
     Run this from a normal terminal. Anywhere else -- a container, or an
     environment that sandboxes its child processes -- macOS refuses to apply a
@@ -1820,7 +1826,7 @@ def sandbox(
 
 
 def _run_bisect(settings: Any, *, report_to: Any = None, as_json: bool = False) -> None:
-    """Run the profile bisect and print the table.
+    """跑 profile 逐条排查，并打印结果表。
 
     Exists because the failure reproduces on the user's machine and not on
     ours: the experiment has to be shipped rather than run. It tests the
@@ -1988,7 +1994,7 @@ def serve(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Start the HTTP/WebSocket service and the web console.
+    """启动 HTTP/WebSocket 服务和 Web 控制台。
 
     `POST /agui` speaks the AG-UI protocol over SSE; the console at `/`
     consumes it. Bind to 127.0.0.1 by default: this service can execute
@@ -2068,7 +2074,7 @@ def desktop(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """Open the desktop window, or build a double-clickable app bundle.
+    """打开桌面窗口，或打包成可双击的应用。
 
     The window is the operating system's own webview around the same server
     and the same console the browser uses, so there is no second UI to keep
@@ -2351,7 +2357,7 @@ def demo(
     home: Optional[Path] = typer.Option(None, "--home"),
     workspace: Optional[Path] = typer.Option(None, "--workspace"),
 ) -> None:
-    """End-to-end run using the offline mock model. No API key needed."""
+    """用离线 mock 模型跑一遍端到端，不需要 API key。"""
     settings = _settings(home, workspace)
 
     async def _run() -> int:
